@@ -64,10 +64,16 @@ export async function createStubGateway(opts: StubGatewayOptions = {}): Promise<
         open.add(sock)
         sock.once('close', () => open.delete(sock))
       })
-      http.once('error', (e) => {
-        http.close() // do not leave a half-created server behind
+      // The wss re-emits the http server's errors and throws if it has no listener, so both need one.
+      const fail = (e: Error): void => {
+        s.close()
+        if (http.listening) http.close()
+        for (const sock of open) sock.destroy()
+        if (httpServer === http) httpServer = undefined
         reject_(e)
-      })
+      }
+      http.once('error', fail)
+      s.once('error', fail)
       http.listen(port, '127.0.0.1', () => {
         port = (http.address() as AddressInfo).port
         wss = s

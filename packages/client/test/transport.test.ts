@@ -1,3 +1,4 @@
+import { createServer as createNetServer } from 'node:net'
 import { HELLO_DEFAULTS } from '@logguber/shared'
 import { createStubGateway, type StubGateway } from './helpers/stub-gateway'
 import { base, batch, sleep, waitFor } from './helpers/fixtures'
@@ -277,14 +278,14 @@ test('an ack, a nack and close() each clear the ack timer and close() does not n
   const g = await gateway({ onBatch: () => {} })
   const onNack = vi.fn()
   const onAck = vi.fn()
-  const t = transport({ ...base, ...handlers, onAck, onNack, url: g.url, ackTimeoutMs: 40 })
+  const t = transport({ ...base, ...handlers, onAck, onNack, url: g.url, ackTimeoutMs: 300 })
   await waitFor(() => t.state() === 'open')
   t.send(batch('a')); t.send(batch('n')); t.send(batch('c'))
   g.conns[0].send({ t: 'ack', id: 'a' })
   g.conns[0].send({ t: 'nack', id: 'n', reason: 'x', retryable: false })
   await waitFor(() => t.inFlight() === 1)
   await t.close()
-  await sleep(120) // well past ackTimeoutMs: a surviving timer would nack
+  await sleep(500) // well past ackTimeoutMs: a surviving timer would nack
   expect(onAck.mock.calls).toEqual([['a']])
   expect(onNack).toHaveBeenCalledTimes(1) // only the gateway's nack for 'n'
   expect(onNack.mock.calls[0][0].id).toBe('n')
@@ -295,6 +296,28 @@ test('stub: close() is final and start() after it throws', async () => {
   const g = await createStubGateway()
   await g.close()
   await expect(g.start()).rejects.toThrow()
+})
+
+test('stub: start() on a port that is taken rejects with EADDRINUSE and nothing escapes', async () => {
+  const uncaught = vi.fn()
+  process.on('uncaughtException', uncaught)
+  try {
+    const g = await gateway()
+    const port = Number(new URL(g.url).port)
+    await g.stop()
+    const squatter = createNetServer()
+    await new Promise<void>((r) => squatter.listen(port, '127.0.0.1', r))
+    try {
+      await expect(g.start()).rejects.toMatchObject({ code: 'EADDRINUSE' })
+      await sleep(30)
+      expect(uncaught).not.toHaveBeenCalled()
+    } finally {
+      await new Promise((r) => squatter.close(r))
+    }
+    await g.start() // nothing was left half-bound: the port is usable again
+  } finally {
+    process.off('uncaughtException', uncaught)
+  }
 })
 
 test('stub: garbage from a client is tolerated', async () => {
