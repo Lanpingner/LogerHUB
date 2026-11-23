@@ -28,6 +28,11 @@
 - Loki ceilings the client must respect: 128 structured-metadata entries, 64KB structured metadata per line, 256KB per line.
 - Entry levels: `debug`, `info`, `warn`, `error`, `fatal`. Unknown levels coerce to `info`.
 - SQLite opened in WAL mode with a busy timeout; spool rows claimed inside a transaction so concurrent workers never send the same batch twice.
+- SQLite binding is the built-in `node:sqlite` (see ledger ruling R1), keeping the package dependency-free of native modules. Package Node floor is therefore 24+.
+- Unspecified defaults, fixed here: `batch.maxQueue` 10000 entries; `truncateJson` maxBytes 8192; transport `ackTimeoutMs` 30000; transport backoff `baseMs` 500, `maxMs` 30000.
+- Wire types (`LogEntry`, `BatchFrame`, frames, limits) are defined once in `@logguber/shared` and re-exported by the client. `packages/client/src/types.ts` holds only client-facing option types and never redefines a wire type.
+- `expressMiddleware` is a `Logger` method. `middleware.ts` exports `createExpressMiddleware(logger, opts)`; `logger.expressMiddleware(opts)` delegates to it. Both names are fixed — do not introduce a third.
+- `Logger.log(level: string, msg: string, opts?)` is public, accepts any string, and coerces unknown levels to `info`. The named level methods delegate to it.
 
 ## Review Focus
 
@@ -262,14 +267,22 @@ test('cuts a partial batch when maxMs elapses', () => {
 
 test('drops oldest beyond maxQueue and reports the count with the next batch', () => {
   const onBatch = vi.fn()
-  const b = createBatcher({ maxEntries: 2, maxMs: 1000, maxQueue: 2, onBatch })
-  b.push(entry('a')); b.push(entry('b'))      // cut at maxEntries
-  onBatch.mockClear()
-  b.push(entry('c')); b.push(entry('d')); b.push(entry('e'))
+  // maxEntries high so nothing drains before flush; maxQueue is what bites
+  const b = createBatcher({ maxEntries: 100, maxMs: 10_000, maxQueue: 2, onBatch })
+  for (const m of ['a', 'b', 'c', 'd', 'e']) b.push(entry(m))
   b.flush()
   const [entries, dropped] = onBatch.mock.calls.at(-1)!
-  expect(dropped).toBeGreaterThan(0)
-  expect(entries.map((e: any) => e.msg)).not.toContain('c')
+  expect(dropped).toBe(3)
+  expect(entries.map((e: any) => e.msg)).toEqual(['d', 'e'])
+})
+
+test('reports a drop count once, then resets it', () => {
+  const onBatch = vi.fn()
+  const b = createBatcher({ maxEntries: 100, maxMs: 10_000, maxQueue: 1, onBatch })
+  b.push(entry('a')); b.push(entry('b')); b.flush()
+  expect(onBatch.mock.calls.at(-1)![1]).toBe(1)
+  b.push(entry('c')); b.flush()
+  expect(onBatch.mock.calls.at(-1)![1]).toBe(0)
 })
 
 test('setLimits lowers the cut size when the server asks for smaller batches', () => {
@@ -352,9 +365,12 @@ test('prunes oldest rows past maxBytes and counts what it dropped', () => {
 })
 
 test('prunes rows older than maxAge', () => {
+  vi.useFakeTimers()
   const s = createSpool({ dir: tmp(), maxAge: 1000 })
-  s.push(batch('old')); vi.setSystemTime(Date.now() + 5000)
+  s.push(batch('old'))
+  vi.advanceTimersByTime(5000)
   expect(s.prune()).toBe(1)
+  vi.useRealTimers()
 })
 
 // Review Focus: an unwritable directory must degrade, not crash
