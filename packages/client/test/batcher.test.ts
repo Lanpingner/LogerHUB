@@ -116,7 +116,7 @@ test('an onBatch that throws never escapes push', () => {
 test('a throwing onBatch is reported via onError and its entries are counted as dropped', () => {
   const onError = vi.fn()
   let calls = 0
-  const onBatch = vi.fn(() => { if (++calls === 1) throw new Error('boom') })
+  const onBatch = vi.fn((_e: LogEntry[], _d: number) => { if (++calls === 1) throw new Error('boom') })
   const b = createBatcher({ maxEntries: 100, maxMs: 10_000, maxQueue: 2, onBatch, onError })
   for (const m of ['a', 'b', 'c']) b.push(entry(m)) // one prior drop
   b.flush() // throws: 2 entries lost
