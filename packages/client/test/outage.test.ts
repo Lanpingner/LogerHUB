@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createLogger } from '../src/logger'
+import { buildCore, createLogger } from '../src/logger'
+import { ulid } from '../src/ulid'
 import { createSpool } from '../src/spool'
 import { createStubGateway, type StubGateway, type StubGatewayOptions } from './helpers/stub-gateway'
 import { base, sleep, tmp, waitFor } from './helpers/fixtures'
@@ -247,7 +248,9 @@ test("a sibling worker's backlog does not push a healthy worker through the disk
   const sibling = track(createLogger(opts({ url: idle.url, spool: { dir, mode: 'always' } })))
   sibling.info('sibling work')
   await sibling.flush()
-  expect(createSpool({ dir }).count()).toBe(1)
+  const backlog = createSpool({ dir })
+  expect(backlog.count()).toBe(1)
+  backlog.close()
 
   const g = await gateway()
   const log = track(createLogger(opts({ url: g.url, spool: { dir } })))
@@ -258,4 +261,41 @@ test("a sibling worker's backlog does not push a healthy worker through the disk
   // backlog that is not this process's to drain.
   expect(g.batches.flatMap((b) => b.entries).map((e) => e.msg)).toEqual(['mine'])
   expect(Date.now() - started).toBeLessThan(300)
+})
+
+test('a refused send releases its claims and re-drains on its own', async () => {
+  const dir = tmp()
+  const g = await gateway()
+  // A row left by a previous process, so the drain loop has something claimed to refuse.
+  const seed = createSpool({ dir })
+  seed.push({ t: 'batch', id: ulid(), entries: [{ ts: new Date().toISOString(), level: 'info', msg: 'previous' }] })
+  seed.close()
+
+  let refusals = 0
+  const core = buildCore(opts({ url: g.url, spool: { dir } }), {
+    // The narrow window the drain loop guards against: the socket is gone but the transport
+    // still reports `open`, so one send is refused although nothing is wrong with the batch.
+    wrapTransport: (t) => ({
+      ...t,
+      send: (b) => {
+        if (refusals > 0) return t.send(b)
+        refusals++
+        return false
+      },
+    }),
+  })
+  try {
+    await waitFor(() => refusals === 1)
+    // Nothing else happens from here: no log call, no flush, no ack, no reconnect. Only the
+    // release plus the logger's own retry can get this row delivered.
+    await waitFor(() => g.batches.flatMap((b) => b.entries).some((e) => e.msg === 'previous'))
+    const rows = spoolRows(dir)
+    try {
+      await waitFor(() => rows.count() === 0)
+    } finally {
+      rows.close()
+    }
+  } finally {
+    await core.close()
+  }
 })

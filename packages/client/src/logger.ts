@@ -10,7 +10,7 @@ import {
 import { createBatcher } from './batcher'
 import { redactBody, truncateJson } from './redact'
 import { createSpool, type Spool } from './spool'
-import { createTransport, type TransportState } from './transport'
+import { createTransport, type Transport, type TransportState } from './transport'
 import { ulid } from './ulid'
 import type { Logger, LoggerOptions, LogOptions } from './types'
 
@@ -25,6 +25,12 @@ const CLOSE_TIMEOUT_MS = 1000
 const SETTLE_POLL_MS = 5
 /** A gateway that nacks is overloaded or restarting: wait before offering the batch again. */
 const NACK_RETRY_DELAY_MS = 2000
+/**
+ * A refused send means the socket died a moment ago and the close event is already queued; this
+ * is long enough for it to land (after which reconnecting re-drains anyway) and short enough
+ * that a released row is not noticeably delayed.
+ */
+const SEND_RETRY_DELAY_MS = 50
 const toError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
 
 /** Finite integer >= 1, otherwise the fallback. */
@@ -204,12 +210,22 @@ export interface LoggerCore {
   close(): Promise<void>
 }
 
+/** Internal test seams, kept off the public options. Not for the package index to re-export. */
+export interface CoreHooks {
+  /** Wraps the transport, to drive refusals a real socket cannot be scheduled into. */
+  wrapTransport?: (t: Transport) => Transport
+}
+
 /**
  * Wires batcher -> transport -> store. Shared by `createLogger` and `createSink`: a log call
  * enqueues, the batcher cuts, the transport sends, and whatever the gateway does not
  * acknowledge ends up in the store to be replayed oldest first.
  */
 export function createCore(opts: LoggerOptions): LoggerCore {
+  return buildCore(opts, {})
+}
+
+export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
   const report = createReporter(opts.onError)
   const baseDims = mergeDims([opts.dims], (e) => report('dims', e))
   const mode = opts.spool?.mode ?? 'on-failure'
@@ -258,7 +274,7 @@ export function createCore(opts: LoggerOptions): LoggerCore {
     onError: (e) => report('batcher', e),
   })
 
-  const transport = createTransport({
+  const transport = (hooks.wrapTransport ?? ((t: Transport) => t))(createTransport({
     url: opts.url,
     apiKey: opts.apiKey,
     service: opts.service,
@@ -269,7 +285,7 @@ export function createCore(opts: LoggerOptions): LoggerCore {
     onState,
     onHello,
     onError: (e) => report('transport', e),
-  })
+  }))
 
   function onBatch(entries: LogEntry[], droppedSinceLast: number): void {
     // The batcher counts dropped entries and resets on read; the store counts pruned batches
@@ -368,13 +384,19 @@ export function createCore(opts: LoggerOptions): LoggerCore {
             sent.set(batch.id, { batch, fromStore: true })
             continue
           }
-          // Unreachable in the current call graph: `send` only refuses a claimed batch over a
-          // duplicate id, which needs an unclaimed row whose id is still pending, and nothing
-          // produces that — `storeInFlight` writes only when closing or when the stream is
-          // down, and `close()` sets `closed` before calling it, so no drain follows. Kept
-          // deliberately: if a future caller breaks that invariant, this turns an unexpected
-          // state into an immediate retry instead of a row stalling for `staleClaimMs`.
+          // Normally unreachable: of the four reasons `send` refuses, three cannot happen
+          // inside this synchronous loop, and the fourth — a duplicate id — needs an
+          // unclaimed row whose id is still pending, which nothing produces (`storeInFlight`
+          // writes only when closing or when the stream is down, and `close()` sets `closed`
+          // before calling it, so no drain follows). What can still reach it is narrow but
+          // real: a socket whose `readyState` has already left OPEN, or whose `send` throws,
+          // while the transport still reports `open` because the close event has not been
+          // delivered yet. So hand back every claim we cannot honour, remember the work, and
+          // try again shortly — otherwise these rows sit unclaimable until the claim expires
+          // (`staleClaimMs`, 60s by default), and nothing else is guaranteed to wake the drain.
           for (let j = i; j < claimed.length; j++) store.release(claimed[j].id)
+          stored = true
+          scheduleRetry(SEND_RETRY_DELAY_MS)
           return
         }
         if (claimed.length < free) return // the store had nothing more to give
