@@ -26,10 +26,11 @@ const SETTLE_POLL_MS = 5
 /** A gateway that nacks is overloaded or restarting: wait before offering the batch again. */
 const NACK_RETRY_DELAY_MS = 2000
 /**
- * A send refused while the transport still reports `open` means the socket sits in ws's CLOSING
- * state, which lasts until its closing handshake finishes — up to ws 8.23.0's 30s close timeout.
- * Retries start here and back off to `SEND_RETRY_MAX_MS`, so a long CLOSING window costs a
- * handful of claim-and-release cycles against the spool file rather than twenty a second.
+ * `transport.send` also refuses over a duplicate id or a full ack window, but the drain loop
+ * excludes both (see the branch that uses this), so the one cause reachable there is a socket in
+ * ws's CLOSING state, which lasts until its closing handshake finishes — up to ws 8.23.0's 30s
+ * close timeout. Retries start here and back off to `SEND_RETRY_MAX_MS`, so a full 30s window
+ * costs about 33 claim-and-release cycles against the spool file rather than about 600.
  */
 const SEND_RETRY_DELAY_MS = 50
 const SEND_RETRY_MAX_MS = 1000
@@ -359,9 +360,11 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
 
   /**
    * One pending nudge, so a nacking gateway is retried on a timer rather than in a loop. A
-   * request made while a timer is already armed is dropped rather than merged, so a 2s nack
-   * floor wins over a shorter send-refusal delay — which is the right way round, but it does
-   * mean a nudge is "as soon as the floor allows", not "shortly".
+   * request made while a timer is already armed is dropped rather than merged, in either order:
+   * a 2s nack floor requested first simply outlasts a later 50ms request, and a nack requested
+   * while a 50ms timer is armed is dropped but still enforced, because the early `drain()` finds
+   * the floor ahead of it and re-arms for the remainder. So a nudge means "as soon as the floor
+   * allows", not "shortly".
    */
   function scheduleRetry(delayMs: number): void {
     if (closed || retryTimer !== undefined) return
@@ -402,7 +405,7 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
           // excludes; a non-OPEN readyState and a full ack window cannot arise inside this
           // synchronous loop; and the duplicate-id refusal needs an unclaimed row whose id is
           // still pending, which nothing produces (`storeInFlight` writes only when closing or
-          // when the stream is down, and `close()` sets `closed` before calling it, so no
+          // when the stream is down, and `shutdown()` sets `closed` before calling it, so no
           // drain follows). One real window remains: readyState CLOSING, which ws holds until
           // the closing handshake completes — up to its 30s close timeout — while the
           // transport still reports `open`. So hand back every claim we cannot honour,

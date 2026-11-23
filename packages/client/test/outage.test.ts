@@ -332,3 +332,37 @@ test('repeated refusals back off instead of churning the spool at a fixed rate',
     await core.close()
   }
 })
+
+test('a successful send resets the refusal backoff', async () => {
+  const dir = tmp()
+  // Never acks: an ack would free a window slot and drive its own drain, hiding the timer whose
+  // delay this test is measuring.
+  const g = await gateway({ onBatch: () => {} })
+  const seed = createSpool({ dir })
+  for (const msg of ['first', 'second']) {
+    seed.push({ t: 'batch', id: ulid(), entries: [{ ts: new Date().toISOString(), level: 'info', msg }] })
+  }
+  seed.close()
+
+  const stamps: number[] = []
+  const core = buildCore(opts({ url: g.url, spool: { dir } }), {
+    // Refuse three times (the delay climbs 50 -> 100 -> 200, leaving 400 armed), let the fourth
+    // through, then refuse the next batch of the same drain: its retry must be the 50ms floor
+    // again, not the 400ms the earlier refusals had reached.
+    wrapTransport: (t) => ({
+      ...t,
+      send: (b) => {
+        stamps.push(Date.now())
+        return stamps.length === 4 || stamps.length > 5 ? t.send(b) : false
+      },
+    }),
+  })
+  try {
+    await waitFor(() => stamps.length >= 6, 3000)
+    const afterReset = stamps[5] - stamps[4]
+    expect(afterReset).toBeGreaterThanOrEqual(40)   // a timer really was used
+    expect(afterReset).toBeLessThan(250)            // and it was the floor, not the raised delay
+  } finally {
+    await core.close()
+  }
+})
