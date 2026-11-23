@@ -26,11 +26,13 @@ const SETTLE_POLL_MS = 5
 /** A gateway that nacks is overloaded or restarting: wait before offering the batch again. */
 const NACK_RETRY_DELAY_MS = 2000
 /**
- * A refused send means the socket died a moment ago and the close event is already queued; this
- * is long enough for it to land (after which reconnecting re-drains anyway) and short enough
- * that a released row is not noticeably delayed.
+ * A send refused while the transport still reports `open` means the socket sits in ws's CLOSING
+ * state, which lasts until its closing handshake finishes — up to ws 8.23.0's 30s close timeout.
+ * Retries start here and back off to `SEND_RETRY_MAX_MS`, so a long CLOSING window costs a
+ * handful of claim-and-release cycles against the spool file rather than twenty a second.
  */
 const SEND_RETRY_DELAY_MS = 50
+const SEND_RETRY_MAX_MS = 1000
 const toError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
 
 /** Finite integer >= 1, otherwise the fallback. */
@@ -261,6 +263,8 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
    */
   let stored = false
   let draining = false
+  /** Grows while sends are refused, back to its floor on the first that is not. */
+  let sendRetryDelay = SEND_RETRY_DELAY_MS
   let closed = false
   let closing: Promise<void> | undefined
   /** Batches handed to the transport, so a nack can find the body and an ack the store row. */
@@ -297,12 +301,19 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
     if (prunedDelta > 0) batch.prunedBatchesSinceLast = prunedDelta
     // `always` keeps a copy before the wire; otherwise the store is only for what cannot go
     // now, and anything of ours already in it takes precedence so replay stays oldest first.
-    if (closed || mode === 'always' || stored || !transport.send(batch)) {
+    if (closed || mode === 'always' || stored || !offer(batch, false)) {
       keep(batch)
       drain()
       return
     }
-    sent.set(batch.id, { batch, fromStore: false })
+  }
+
+  /** `transport.send` plus the bookkeeping a successful send implies. */
+  function offer(batch: BatchFrame, fromStore: boolean): boolean {
+    if (!transport.send(batch)) return false
+    sendRetryDelay = SEND_RETRY_DELAY_MS
+    sent.set(batch.id, { batch, fromStore })
+    return true
   }
 
   /** Every write to the store goes through here, so the hot-path flag cannot drift. */
@@ -346,7 +357,12 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
     scheduleRetry(NACK_RETRY_DELAY_MS)
   }
 
-  /** One pending nudge, so a nacking gateway is retried on a timer rather than in a loop. */
+  /**
+   * One pending nudge, so a nacking gateway is retried on a timer rather than in a loop. A
+   * request made while a timer is already armed is dropped rather than merged, so a 2s nack
+   * floor wins over a shorter send-refusal delay — which is the right way round, but it does
+   * mean a nudge is "as soon as the floor allows", not "shortly".
+   */
   function scheduleRetry(delayMs: number): void {
     if (closed || retryTimer !== undefined) return
     retryTimer = setTimeout(() => {
@@ -380,23 +396,23 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
         }
         for (let i = 0; i < claimed.length; i++) {
           const batch = claimed[i]
-          if (transport.send(batch)) {
-            sent.set(batch.id, { batch, fromStore: true })
-            continue
-          }
-          // Normally unreachable: of the four reasons `send` refuses, three cannot happen
-          // inside this synchronous loop, and the fourth — a duplicate id — needs an
-          // unclaimed row whose id is still pending, which nothing produces (`storeInFlight`
-          // writes only when closing or when the stream is down, and `close()` sets `closed`
-          // before calling it, so no drain follows). What can still reach it is narrow but
-          // real: a socket whose `readyState` has already left OPEN, or whose `send` throws,
-          // while the transport still reports `open` because the close event has not been
-          // delivered yet. So hand back every claim we cannot honour, remember the work, and
-          // try again shortly — otherwise these rows sit unclaimable until the claim expires
-          // (`staleClaimMs`, 60s by default), and nothing else is guaranteed to wake the drain.
+          if (offer(batch, true)) continue
+          // Normally unreachable, read out of ws 8.23.0 rather than assumed. `send` throws
+          // only when readyState is CONNECTING, which `transport.send`'s own OPEN check
+          // excludes; a non-OPEN readyState and a full ack window cannot arise inside this
+          // synchronous loop; and the duplicate-id refusal needs an unclaimed row whose id is
+          // still pending, which nothing produces (`storeInFlight` writes only when closing or
+          // when the stream is down, and `close()` sets `closed` before calling it, so no
+          // drain follows). One real window remains: readyState CLOSING, which ws holds until
+          // the closing handshake completes — up to its 30s close timeout — while the
+          // transport still reports `open`. So hand back every claim we cannot honour,
+          // remember the work, and ask for another attempt; otherwise these rows sit
+          // unclaimable until the claim expires (`staleClaimMs`, 60s by default) and nothing
+          // else is guaranteed to wake the drain.
           for (let j = i; j < claimed.length; j++) store.release(claimed[j].id)
           stored = true
-          scheduleRetry(SEND_RETRY_DELAY_MS)
+          scheduleRetry(sendRetryDelay)
+          sendRetryDelay = Math.min(SEND_RETRY_MAX_MS, sendRetryDelay * 2)
           return
         }
         if (claimed.length < free) return // the store had nothing more to give

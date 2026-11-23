@@ -249,8 +249,11 @@ test("a sibling worker's backlog does not push a healthy worker through the disk
   sibling.info('sibling work')
   await sibling.flush()
   const backlog = createSpool({ dir })
-  expect(backlog.count()).toBe(1)
-  backlog.close()
+  try {
+    expect(backlog.count()).toBe(1)
+  } finally {
+    backlog.close()
+  }
 
   const g = await gateway()
   const log = track(createLogger(opts({ url: g.url, spool: { dir } })))
@@ -295,6 +298,36 @@ test('a refused send releases its claims and re-drains on its own', async () => 
     } finally {
       rows.close()
     }
+  } finally {
+    await core.close()
+  }
+})
+
+test('repeated refusals back off instead of churning the spool at a fixed rate', async () => {
+  const dir = tmp()
+  const g = await gateway()
+  const seed = createSpool({ dir })
+  seed.push({ t: 'batch', id: ulid(), entries: [{ ts: new Date().toISOString(), level: 'info', msg: 'previous' }] })
+  seed.close()
+
+  let refusals = 0
+  let firstRefusal = 0
+  const core = buildCore(opts({ url: g.url, spool: { dir } }), {
+    wrapTransport: (t) => ({
+      ...t,
+      send: (b) => {
+        if (refusals >= 3) return t.send(b)
+        if (refusals++ === 0) firstRefusal = Date.now()
+        return false
+      },
+    }),
+  })
+  try {
+    await waitFor(() => g.batches.flatMap((b) => b.entries).some((e) => e.msg === 'previous'), 3000)
+    // Three refusals at 50, 100 and 200ms rather than three at 50: a CLOSING socket that holds
+    // on for ws's 30s close timeout must not cost twenty claim-and-release cycles a second.
+    expect(refusals).toBe(3)
+    expect(Date.now() - firstRefusal).toBeGreaterThanOrEqual(300)
   } finally {
     await core.close()
   }
