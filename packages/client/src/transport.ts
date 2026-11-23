@@ -1,5 +1,5 @@
 import WebSocket from 'ws'
-import { HELLO_DEFAULTS, type BatchFrame, type NackFrame, type ServerFrame } from '@logguber/shared'
+import { HELLO_DEFAULTS, type BatchFrame, type HelloFrame, type NackFrame, type ServerFrame } from '@logguber/shared'
 
 export type TransportState = 'connecting' | 'open' | 'closed' | 'fatal'
 
@@ -21,14 +21,23 @@ export interface TransportOptions {
   ackTimeoutMs?: number
   /** Reconnect delay is `min(maxMs, baseMs * 2 ** attempt)` with full jitter. Default 500 / 30000. */
   backoff?: { baseMs: number; maxMs: number }
-  /** Test seams. `random` defaults to Math.random; `onBackoff` observes each scheduled delay. */
+  /** The gateway's announced limits, which override the client's configured ones. Called before state `open` is reported. */
+  onHello?: (h: HelloFrame) => void
+}
+
+/** Internal test seams; not part of the public surface. */
+export interface TransportHooks {
+  /** Defaults to Math.random. */
   random?: () => number
+  /** Observes each scheduled reconnect delay. */
   onBackoff?: (delayMs: number) => void
 }
 
 export interface Transport {
   /** False when the socket is not open or the ack window is full: the caller should spool. */
   send(b: BatchFrame): boolean
+  /** Sent but not yet acked batches, so the caller can spool them before exit. */
+  inFlightBatches(): BatchFrame[]
   inFlight(): number
   state(): TransportState
   /** Final teardown; idempotent. In-flight batches are not nacked: they stay unacked in the spool. */
@@ -41,11 +50,15 @@ const DEFAULT_BACKOFF = { baseMs: 500, maxMs: 30_000 }
 const HANDSHAKE_TIMEOUT_MS = 10_000
 
 export function createTransport(opts: TransportOptions): Transport {
+  return buildTransport(opts, {})
+}
+
+export function buildTransport(opts: TransportOptions, hooks: TransportHooks): Transport {
   const ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
   const backoff = opts.backoff ?? DEFAULT_BACKOFF
-  const random = opts.random ?? Math.random
+  const random = hooks.random ?? Math.random
 
-  const pending = new Map<string, ReturnType<typeof setTimeout>>()
+  const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; batch: BatchFrame }>()
   let state: TransportState = 'connecting'
   let ws: WebSocket | undefined
   let ackWindow: number = HELLO_DEFAULTS.ackWindow
@@ -69,7 +82,7 @@ export function createTransport(opts: TransportOptions): Transport {
 
   function releaseAll(reason: string): void {
     const ids = [...pending.keys()]
-    for (const t of pending.values()) clearTimeout(t)
+    for (const p of pending.values()) clearTimeout(p.timer)
     pending.clear()
     for (const id of ids) guard(() => opts.onNack({ t: 'nack', id, reason, retryable: true }))
   }
@@ -124,6 +137,7 @@ export function createTransport(opts: TransportOptions): Transport {
       case 'hello':
         if (Number.isInteger(frame.ackWindow) && frame.ackWindow >= 1) ackWindow = frame.ackWindow
         attempt = 0
+        guard(() => opts.onHello?.(frame))
         setState('open')
         break
       case 'ack':
@@ -138,9 +152,9 @@ export function createTransport(opts: TransportOptions): Transport {
   }
 
   function release(id: string): boolean {
-    const timer = pending.get(id)
-    if (timer === undefined) return false // never sent, already acked or already timed out
-    clearTimeout(timer)
+    const p = pending.get(id)
+    if (p === undefined) return false // never sent, already acked or already timed out
+    clearTimeout(p.timer)
     pending.delete(id)
     return true
   }
@@ -164,7 +178,7 @@ export function createTransport(opts: TransportOptions): Transport {
     const ceiling = Math.min(backoff.maxMs, backoff.baseMs * 2 ** attempt)
     attempt++
     const ms = random() * ceiling // full jitter: uniform in [0, ceiling)
-    guard(() => opts.onBackoff?.(ms))
+    guard(() => hooks.onBackoff?.(ms))
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
       connect()
@@ -189,16 +203,17 @@ export function createTransport(opts: TransportOptions): Transport {
         guard(() => opts.onNack({ t: 'nack', id: b.id, reason: 'ack timeout', retryable: true }))
       }, ackTimeoutMs)
       timer.unref()
-      pending.set(b.id, timer)
+      pending.set(b.id, { timer, batch: b })
       return true
     },
+    inFlightBatches: () => [...pending.values()].map((p) => p.batch),
     inFlight: () => pending.size,
     state: () => state,
     close() {
       if (closing) return closing
       finished = true
       clearReconnect()
-      for (const t of pending.values()) clearTimeout(t)
+      for (const p of pending.values()) clearTimeout(p.timer)
       pending.clear()
       const sock = ws
       ws = undefined

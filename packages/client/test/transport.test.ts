@@ -1,6 +1,6 @@
 import { createStubGateway, type StubGateway } from './helpers/stub-gateway'
 import { base, batch, sleep, waitFor } from './helpers/fixtures'
-import { createTransport, type Transport } from '../src/transport'
+import { buildTransport, createTransport, type Transport, type TransportHooks } from '../src/transport'
 
 const gateways: StubGateway[] = []
 const transports: Transport[] = []
@@ -10,8 +10,8 @@ async function gateway(opts?: Parameters<typeof createStubGateway>[0]): Promise<
   gateways.push(g)
   return g
 }
-function transport(opts: Parameters<typeof createTransport>[0]): Transport {
-  const t = createTransport(opts)
+function transport(opts: Parameters<typeof createTransport>[0], hooks: TransportHooks = {}): Transport {
+  const t = buildTransport(opts, hooks)
   transports.push(t)
   return t
 }
@@ -161,10 +161,9 @@ test('one failed connect counts as one attempt: backoff grows once per failure a
     ...handlers,
     url: g.url,
     backoff: { baseMs: 10, maxMs: 1000 },
-    random: () => {
-      return 1 // full jitter at its ceiling makes the delay observable
-    },
-    onBackoff: (ms: number) => delays.push(ms),
+  }, {
+    random: () => 1, // full jitter at its ceiling makes the delay observable
+    onBackoff: (ms) => delays.push(ms),
   })
   await waitFor(() => delays.length >= 3)
   expect(delays.slice(0, 3)).toEqual([10, 20, 40]) // error + close did not double count
@@ -208,16 +207,41 @@ test('close() while open tears the socket down', async () => {
   await waitFor(() => g.conns[0].closed)
 })
 
-test('never throws into the app when a callback throws', async () => {
-  const g = await gateway()
-  const t = transport({
-    ...base,
-    url: g.url,
-    onAck: () => { throw new Error('boom') },
-    onNack: noop,
-    onState: () => { throw new Error('boom') },
-  })
+test('never throws into the app when any callback throws, including onError', async () => {
+  const boom = () => { throw new Error('boom') }
+  const g = await gateway({ onBatch: (b, c) => c.send({ t: 'nack', id: b.id, reason: 'x', retryable: false }) })
+  const t = transport({ ...base, url: g.url, onAck: boom, onNack: boom, onState: boom, onError: boom, onHello: boom })
   await waitFor(() => t.state() === 'open')
   t.send(batch('1'))
+  await waitFor(() => t.inFlight() === 0) // onNack threw but the slot was released
+  g.conns[0].sendRaw('{bad') // drives onError, which throws
+  await sleep(30)
+  expect(t.state()).toBe('open')
+  await g.stop() // transient close drives onNack/onState/onError throwing paths
+  await waitFor(() => t.state() !== 'open')
+})
+
+test('onHello receives the server limits, before state open is reported', async () => {
+  const g = await gateway({ hello: { ackWindow: 3, maxEntriesPerBatch: 77, maxBatchBytes: 999 } })
+  const order: string[] = []
+  const onHello = vi.fn(() => { order.push('hello') })
+  const t = transport({ ...base, ...handlers, onHello, onState: (s) => order.push(s), url: g.url })
+  await waitFor(() => t.state() === 'open')
+  expect(onHello).toHaveBeenCalledWith({ t: 'hello', ackWindow: 3, maxEntriesPerBatch: 77, maxBatchBytes: 999 })
+  expect(order.indexOf('hello')).toBeLessThan(order.indexOf('open'))
+})
+
+test('inFlightBatches returns sent-but-unacked batches and empties on ack', async () => {
+  const g = await gateway({ onBatch: () => {} })
+  const t = transport({ ...base, ...handlers, url: g.url })
+  await waitFor(() => t.state() === 'open')
+  const b1 = batch('1'), b2 = batch('2')
+  t.send(b1); t.send(b2)
+  expect(t.inFlightBatches()).toEqual([b1, b2])
+  g.conns[0].send({ t: 'ack', id: '1' })
+  await waitFor(() => t.inFlight() === 1)
+  expect(t.inFlightBatches()).toEqual([b2])
+  g.conns[0].send({ t: 'ack', id: '2' })
   await waitFor(() => t.inFlight() === 0)
+  expect(t.inFlightBatches()).toEqual([])
 })
