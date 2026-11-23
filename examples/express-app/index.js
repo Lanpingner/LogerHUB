@@ -1,5 +1,12 @@
-// Run against a gateway:   LOGGUBER_URL=ws://localhost:8080/ingest LOGGUBER_KEY=... npm start
-// Build the client first:  pnpm --filter @logguber/client build
+// Setup:  pnpm --filter @logguber/client build   (from the repo root, once)
+//         npm install                             (in this directory; the client is a file: dependency)
+//         npm start
+//
+// The Logguber gateway is not built yet, so nothing is listening at the default URL below and the
+// example will spool to disk (./.logguber-spool/spool.db) instead of delivering. That is the
+// outage path working: you will see one "connect ECONNREFUSED" warning, requests still succeed,
+// and the batches are kept until a gateway accepts them. Point LOGGUBER_URL / LOGGUBER_KEY at a
+// real gateway once one exists.
 import express from 'express'
 import { createLogger } from '@logguber/client'
 

@@ -48,6 +48,8 @@ function nonEmpty(v: unknown): unknown {
 function requestBody(req: RequestLike, maxBytes: number, allowFields?: string[]): unknown {
   const b = req.body
   if (b === null || typeof b !== 'object' || Buffer.isBuffer(b) || ArrayBuffer.isView(b)) return undefined
+  // No `redactKeys` here on purpose: the logger redacts all of `meta` again, with the custom
+  // keys, in `accept` (logger.ts). Custom keys reach request bodies only through that pass.
   return nonEmpty(truncateJson(redactBody(b, { allowFields }), maxBytes))
 }
 

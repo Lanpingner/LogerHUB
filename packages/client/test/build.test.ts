@@ -2,15 +2,17 @@ import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { LEVELS } from '@logguber/shared'
 
 const require = createRequire(import.meta.url)
-const dist = (f: string): string => path.resolve('packages/client/dist', f)
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const dist = (f: string): string => path.join(root, 'packages/client/dist', f)
 
 describe('built package', () => {
   beforeAll(() => {
-    fs.rmSync(path.resolve('packages/client/dist'), { recursive: true, force: true })
-    execSync('pnpm --filter @logguber/client build', { stdio: 'inherit' })
+    fs.rmSync(path.join(root, 'packages/client/dist'), { recursive: true, force: true })
+    execSync('pnpm --filter @logguber/client build', { stdio: 'inherit', cwd: root })
   }, 120_000)
 
   test('is importable both ways and exposes createLogger', async () => {
@@ -35,7 +37,7 @@ describe('built package', () => {
       expect(src).toMatch(/node:sqlite/)
       expect(src).toMatch(/["']ws["']/)
     }
-    const pkg = JSON.parse(fs.readFileSync('packages/client/package.json', 'utf8'))
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'packages/client/package.json'), 'utf8'))
     expect(Object.keys(pkg.dependencies)).toEqual(['ws'])
     expect(fs.existsSync(dist('index.d.mts'))).toBe(true)
     expect(fs.readFileSync(dist('index.d.ts'), 'utf8').replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')).not.toContain('@logguber/shared')

@@ -482,7 +482,9 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
     if (Object.keys(merged).length > 0) entry.dims = merged
     if (raw.meta !== undefined) {
       // Redaction and truncation happen here, before the queue, so no secret ever reaches
-      // the network or the disk.
+      // the network or the disk. The Express middleware relies on this pass for the custom
+      // `redactKeys` (it applies only the defaults to request bodies), so every entry's `meta`
+      // must keep going through `redactBody` here.
       const meta = truncateJson(redactBody(raw.meta, { redactKeys: opts.redactKeys }))
       if (meta !== undefined) entry.meta = asRecord(meta)
     }
