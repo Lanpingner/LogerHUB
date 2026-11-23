@@ -7,8 +7,6 @@ import {
   safeStringify,
   truncateJson,
 } from '../src/redact'
-import { entry, tmp } from './helpers/fixtures'
-import { existsSync } from 'node:fs'
 
 test('captures only allowlisted headers, whatever case they arrive in', () => {
   const out = redactHeaders({
@@ -34,6 +32,7 @@ test('default lists match the spec exactly', () => {
   expect(DEFAULT_REDACT_KEYS).toEqual([
     'password', 'pass', 'token', 'secret', 'apikey', 'api_key', 'authorization',
     'credential', 'card', 'cardnumber', 'cvv', 'ssn', 'otp', 'refresh_token',
+    'passwd', 'pwd', 'jwt', 'bearer', 'cookie', 'sessionid',
   ])
 })
 
@@ -176,10 +175,94 @@ test('truncateJson defaults to 8192 bytes and is exact at the boundary', () => {
   expect(truncateJson(fits + 'a')).toEqual({ _truncated: true, _bytes: 8193 })
 })
 
-test('fixtures: entry is valid and tmp is a fresh empty directory', () => {
-  const e = entry('hi')
-  expect(e).toMatchObject({ level: 'info', msg: 'hi' })
-  expect(new Date(e.ts).toISOString()).toBe(e.ts)
-  expect(existsSync(tmp())).toBe(true)
-  expect(tmp()).not.toBe(tmp())
+// Review finding 1: never throw into application code
+const throwingGetter = () => ({ get boom(): string { throw new Error('getter') } })
+const throwingToJSON = () => ({ toJSON() { throw new Error('toJSON') } })
+
+test.each([['getter', throwingGetter], ['toJSON', throwingToJSON]] as const)(
+  'redactBody fails closed on a throwing %s', (_n, make) => {
+    expect(() => redactBody(make())).not.toThrow()
+    expect(redactBody({ nested: make() })).toBe('[unredactable]')
+    expect(redactBody(make(), { allowFields: ['a'] })).toBe('[unredactable]')
+  })
+
+test('redactBody fails closed on a Proxy that throws and on absurd nesting', () => {
+  const proxy = new Proxy({}, { ownKeys() { throw new Error('proxy') } })
+  expect(redactBody(proxy)).toBe('[unredactable]')
+  let deep: any = { password: 'p' }
+  for (let i = 0; i < 200000; i++) deep = { d: deep }
+  expect(() => redactBody(deep)).not.toThrow()
+  expect(redactBody(deep)).toBe('[unredactable]')
+})
+
+test.each([['getter', throwingGetter], ['toJSON', throwingToJSON]] as const)(
+  'redactHeaders does not throw on a throwing %s and leaks nothing', (_n, make) => {
+    expect(() => redactHeaders(make())).not.toThrow()
+    const proxy = new Proxy({}, { ownKeys() { throw new Error('proxy') } })
+    expect(redactHeaders(proxy)).toEqual({})
+    const hostile = { host: 'h', get 'user-agent'(): string { throw new Error('x') } }
+    expect(redactHeaders(hostile)).toEqual({})
+  })
+
+// Review finding 2: JSON-in-a-string bodies
+test('a top-level JSON string body is parsed and redacted, returning an object', () => {
+  expect(redactBody('{"password":"x","a":1}')).toEqual({ password: '[redacted]', a: 1 })
+  expect(redactBody('  [{"token":"t"}]  ')).toEqual([{ token: '[redacted]' }])
+})
+
+test('JSON strings nested as an object value or array element are redacted too', () => {
+  expect(redactBody({ payload: '{"password":"x"}', list: ['{"token":"t"}'] }))
+    .toEqual({ payload: { password: '[redacted]' }, list: [{ token: '[redacted]' }] })
+})
+
+test('a JSON string body still honours allowFields', () => {
+  expect(redactBody('{"id":1,"notes":"n"}', { allowFields: ['id'] })).toEqual({ id: 1 })
+})
+
+test('non-JSON and malformed-JSON strings pass through unchanged', () => {
+  expect(redactBody('plain text password=x')).toBe('plain text password=x')
+  expect(redactBody('{"password": "x"')).toBe('{"password": "x"')
+  expect(redactBody({ s: '[not json' })).toEqual({ s: '[not json' })
+})
+
+// Review finding 3: referer scrubbing
+test('referer keeps scheme, host and path but drops query, fragment and userinfo', () => {
+  expect(redactHeaders({ Referer: 'https://u:pw@app.example.com/cb/path?token=abc#frag' }))
+    .toEqual({ referer: 'https://app.example.com/cb/path' })
+  expect(redactHeaders({ referer: 'https://app.example.com:8443/' }))
+    .toEqual({ referer: 'https://app.example.com:8443/' })
+})
+
+test('an unparseable referer is dropped entirely', () => {
+  expect(redactHeaders({ referer: '/relative?token=abc', host: 'h' })).toEqual({ host: 'h' })
+  expect(redactHeaders({ referer: 'not a url' })).toEqual({})
+})
+
+// Review finding 4: truncateJson always returns something serialisable
+test('truncateJson output survives plain JSON.stringify for cyclic and BigInt input', () => {
+  const v: any = { n: 10n, fn: () => {}, name: 'a' }; v.self = v
+  const out = truncateJson(v)
+  expect(() => JSON.stringify(out)).not.toThrow()
+  expect(out).toEqual({ n: '10', name: 'a', self: '[circular]' })
+})
+
+// Review finding 5: NFKC
+test('fullwidth keys are normalised and redacted', () => {
+  expect(redactBody({ 'ｐａｓｓｗｏｒｄ': 'p', 'ＡＰＩ＿ＫＥＹ': 'k' }))
+    .toEqual({ 'ｐａｓｓｗｏｒｄ': '[redacted]', 'ＡＰＩ＿ＫＥＹ': '[redacted]' })
+})
+
+test('known limit: a Cyrillic-homoglyph key is NOT redacted, and an all-symbol key never matches', () => {
+  expect(redactBody({ 'p\u0430ssword': 'p' })).toEqual({ 'p\u0430ssword': 'p' })
+  expect(redactBody({ '日本語': 'v', '---': 'v' }, { redactKeys: [''] })).toEqual({ '日本語': 'v', '---': 'v' })
+})
+
+// Review finding 6: extra default keys
+test.each(['passwd', 'pwd', 'jwt', 'bearer', 'cookie', 'sessionid', 'session_id', 'Session-ID'])(
+  'default key %s is redacted', (key) => {
+    expect(redactBody({ [key]: 'v' })).toEqual({ [key]: '[redacted]' })
+  })
+
+test('session_count is not redacted (no bare "session" substring)', () => {
+  expect(redactBody({ session_count: 3 })).toEqual({ session_count: 3 })
 })
