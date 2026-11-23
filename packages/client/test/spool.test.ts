@@ -73,16 +73,21 @@ test('creates the spool directory when it does not exist yet', () => {
 })
 
 // Review Focus: an unwritable directory must degrade, not crash
-test('falls back to unavailable instead of throwing when the directory cannot be written', () => {
-  const ro = tmp(); fs.chmodSync(ro, 0o400)
-  const onError = vi.fn()
-  const s = createSpool({ dir: ro, onError })
-  expect(s.available()).toBe(false)
-  expect(() => s.push(batch('01A'))).not.toThrow()
-  expect(s.claim(5)).toEqual([])
-  expect(s.count()).toBe(0)
-  expect(onError).toHaveBeenCalled()
-  fs.chmodSync(ro, 0o700)
+// root ignores directory modes, so the premise does not hold there
+test.skipIf(process.getuid?.() === 0)('falls back to unavailable instead of throwing when the directory cannot be written', () => {
+  const ro = tmp()
+  fs.chmodSync(ro, 0o400)
+  try {
+    const onError = vi.fn()
+    const s = createSpool({ dir: ro, onError })
+    expect(s.available()).toBe(false)
+    expect(() => s.push(batch('01A'))).not.toThrow()
+    expect(s.claim(5)).toEqual([])
+    expect(s.count()).toBe(0)
+    expect(onError).toHaveBeenCalled()
+  } finally {
+    fs.chmodSync(ro, 0o700)
+  }
 })
 
 // Review Focus: a corrupt database file must not wedge startup
@@ -96,10 +101,25 @@ test('recreates the database when the file is not valid SQLite', () => {
 
 test('two spools on the same file never claim the same batch', () => {
   const dir = tmp()
-  const a = createSpool({ dir }); const b = createSpool({ dir })
-  a.push(batch('01A')); a.push(batch('01B'))
-  const got = [...a.claim(1), ...b.claim(1), ...a.claim(1), ...b.claim(1)].map((c) => c.id)
-  expect(got.sort()).toEqual(['01A', '01B'])
+  const a = createSpool({ dir }); const b = createSpool({ dir }) // two separate connections
+  for (let i = 0; i < 6; i++) a.push(batch(`id${i}`))
+  const got: string[] = []
+  for (let i = 0; i < 4; i++) got.push(...a.claim(1).map((c) => c.id), ...b.claim(1).map((c) => c.id))
+  expect(got.sort()).toEqual(['id0', 'id1', 'id2', 'id3', 'id4', 'id5'])
+})
+
+test('claim takes the write lock up front, and a lock timeout leaves nothing half-claimed', () => {
+  const dir = tmp()
+  const onError = vi.fn()
+  const s = createSpool({ dir, busyTimeoutMs: 20, onError })
+  s.push(batch('01A'))
+  const other = new DatabaseSync(path.join(dir, 'spool.db'))
+  other.exec('BEGIN IMMEDIATE') // a sibling worker mid-claim
+  expect(s.claim(1)).toEqual([])
+  expect(onError).toHaveBeenCalled()
+  other.exec('ROLLBACK'); other.close()
+  // the failed claim left no transaction open and no row claimed
+  expect(s.claim(1).map((c) => c.id)).toEqual(['01A'])
 })
 
 test('rows survive a restart', () => {
@@ -205,5 +225,130 @@ describe('stale claim reclaim', () => {
     expect(s.claim(1)).toEqual([])
     vi.advanceTimersByTime(2000)
     expect(s.claim(1)).toHaveLength(1)
+  })
+})
+
+describe('hardening', () => {
+  test('a pre-existing spool table of the wrong shape is replaced, not thrown', () => {
+    const dir = tmp()
+    const old = new DatabaseSync(path.join(dir, 'spool.db'))
+    old.exec('CREATE TABLE spool (id TEXT PRIMARY KEY, payload TEXT)')
+    old.close()
+    const onError = vi.fn()
+    let s!: ReturnType<typeof createSpool>
+    expect(() => { s = createSpool({ dir, onError }) }).not.toThrow()
+    expect(s.available()).toBe(true)
+    s.push(batch('01A'))
+    expect(s.claim(1)[0].id).toBe('01A')
+    expect(onError).toHaveBeenCalled()
+  })
+
+  test('a single batch larger than maxBytes is rejected without touching existing rows', () => {
+    const onError = vi.fn()
+    const s = createSpool({ dir: tmp(), maxBytes: 1000, onError })
+    s.push(batch('small1')); s.push(batch('small2'))
+    s.push(batch('huge', 'x'.repeat(5000)))
+    expect(s.count()).toBe(2)
+    expect(s.prunedCount()).toBe(1)
+    expect(onError).toHaveBeenCalled()
+    expect(s.claim(5).map((c) => c.id)).toEqual(['small1', 'small2'])
+  })
+
+  test('size pruning evicts oldest first and never the row just pushed', () => {
+    const s = createSpool({ dir: tmp(), maxBytes: 1500 })
+    for (let i = 0; i < 4; i++) s.push(batch(`id${i}`, 'x'.repeat(300)))
+    const ids = s.claim(10).map((c) => c.id)
+    expect(ids.at(-1)).toBe('id3')
+    expect(ids).not.toContain('id0')
+  })
+
+  test('size pruning prefers unclaimed rows over in-flight ones', () => {
+    const s = createSpool({ dir: tmp(), maxBytes: 1500 })
+    s.push(batch('flight', 'x'.repeat(300)))
+    expect(s.claim(1)).toHaveLength(1)
+    for (let i = 0; i < 4; i++) s.push(batch(`id${i}`, 'x'.repeat(300)))
+    expect(s.prunedCount()).toBeGreaterThan(0)
+    s.release('flight') // still present: it was evicted last
+    expect(s.claim(10).map((c) => c.id)).toContain('flight')
+  })
+
+  test('the running byte total tracks acks so ack-then-push does not over-prune', () => {
+    const s = createSpool({ dir: tmp(), maxBytes: 1500 })
+    for (let i = 0; i < 20; i++) {
+      s.push(batch(`id${i}`, 'x'.repeat(300)))
+      for (const c of s.claim(1)) s.ack(c.id)
+    }
+    expect(s.prunedCount()).toBe(0)
+  })
+
+  test('releasing an unclaimed row is a no-op and does not count an attempt', () => {
+    const dir = tmp()
+    const s = createSpool({ dir })
+    s.push(batch('01A')); s.release('01A')
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    expect(db.prepare('SELECT attempts FROM spool WHERE id = ?').get('01A')).toMatchObject({ attempts: 0 })
+    db.close()
+  })
+
+  test('a failed claim-mark rolls back and does not delete a healthy row', () => {
+    const dir = tmp()
+    const onError = vi.fn()
+    const s = createSpool({ dir, onError })
+    s.push(batch('01A'))
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    db.exec(`CREATE TRIGGER no_mark BEFORE UPDATE OF claimed_at ON spool
+             WHEN NEW.claimed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'disk full'); END`)
+    expect(s.claim(1)).toEqual([])
+    expect(onError).toHaveBeenCalled()
+    expect(s.count()).toBe(1)
+    expect(s.prunedCount()).toBe(0)
+    db.exec('DROP TRIGGER no_mark'); db.close()
+    expect(s.claim(1).map((c) => c.id)).toEqual(['01A']) // no transaction left open
+  })
+
+  test('pruned is not counted when the transaction rolls back', () => {
+    const dir = tmp()
+    const s = createSpool({ dir, maxBytes: 600 })
+    s.push(batch('a', 'x'.repeat(100)))
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    db.exec(`CREATE TRIGGER no_del BEFORE DELETE ON spool BEGIN SELECT RAISE(ABORT, 'io'); END`)
+    s.push(batch('b', 'x'.repeat(300))); s.push(batch('c', 'x'.repeat(300)))
+    expect(s.prunedCount()).toBe(0)
+    db.close()
+  })
+
+  function corruptPages(dir: string) {
+    const f = path.join(dir, 'spool.db')
+    const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
+    const size = fs.statSync(f).size
+    const fd = fs.openSync(f, 'r+') // keep page 1 (the header) intact: damage is mid-life, not at open
+    fs.writeSync(fd, Buffer.alloc(size - 4096, 0x5a), 0, size - 4096, 4096)
+    fs.closeSync(fd)
+  }
+  const fill = (s: ReturnType<typeof createSpool>) => { for (let i = 0; i < 30; i++) s.push(batch(`a${i}`, 'x'.repeat(500))) }
+
+  test('mid-life page corruption is reported and the spool recovers onto a fresh file', () => {
+    const dir = tmp(); const onError = vi.fn()
+    const s = createSpool({ dir, onError })
+    fill(s); corruptPages(dir)
+    expect(s.count()).toBe(0)
+    expect(onError).toHaveBeenCalled()
+    expect(s.available()).toBe(true)
+    s.push(batch('after'))
+    expect(s.claim(1)[0].id).toBe('after')
+  })
+
+  test.skipIf(process.getuid?.() === 0)('available() is false once mid-life corruption cannot be recovered', () => {
+    const dir = tmp(); const onError = vi.fn()
+    const s = createSpool({ dir, onError })
+    fill(s); corruptPages(dir)
+    fs.chmodSync(dir, 0o500) // recovery cannot delete the damaged file
+    try {
+      expect(() => s.count()).not.toThrow()
+      expect(s.available()).toBe(false)
+      expect(() => s.push(batch('x'))).not.toThrow()
+    } finally {
+      fs.chmodSync(dir, 0o700)
+    }
   })
 })
