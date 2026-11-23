@@ -154,3 +154,56 @@ test('a failing write is reported and does not throw', () => {
   expect(() => s.push(batch('01A'))).not.toThrow()
   expect(onError).toHaveBeenCalled()
 })
+
+describe('stale claim reclaim', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const attempts = (dir: string, id: string) => {
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    const row = db.prepare('SELECT attempts FROM spool WHERE id = ?').get(id) as { attempts: number }
+    db.close()
+    return row.attempts
+  }
+
+  test('a claim older than staleClaimMs is returned by the next claim and counts an attempt', () => {
+    const dir = tmp()
+    const s = createSpool({ dir, staleClaimMs: 1000 })
+    s.push(batch('01A')); s.claim(1)
+    vi.advanceTimersByTime(1500)
+    expect(s.claim(1).map((c) => c.id)).toEqual(['01A'])
+    expect(attempts(dir, '01A')).toBe(1)
+  })
+
+  test('a claim newer than staleClaimMs is not returned', () => {
+    const s = createSpool({ dir: tmp(), staleClaimMs: 1000 })
+    s.push(batch('01A')); s.claim(1)
+    vi.advanceTimersByTime(500)
+    expect(s.claim(1)).toEqual([])
+  })
+
+  test('a reclaimed row is still deleted by ack', () => {
+    const s = createSpool({ dir: tmp(), staleClaimMs: 1000 })
+    s.push(batch('01A')); s.claim(1)
+    vi.advanceTimersByTime(1500)
+    s.claim(1); s.ack('01A')
+    expect(s.count()).toBe(0)
+  })
+
+  test('the stale sweep does not resurrect an acked row', () => {
+    const s = createSpool({ dir: tmp(), staleClaimMs: 1000 })
+    s.push(batch('01A')); s.claim(1); s.ack('01A')
+    vi.advanceTimersByTime(5000)
+    expect(s.claim(1)).toEqual([])
+    expect(s.count()).toBe(0)
+  })
+
+  test('defaults to 60s', () => {
+    const s = createSpool({ dir: tmp() })
+    s.push(batch('01A')); s.claim(1)
+    vi.advanceTimersByTime(59000)
+    expect(s.claim(1)).toEqual([])
+    vi.advanceTimersByTime(2000)
+    expect(s.claim(1)).toHaveLength(1)
+  })
+})

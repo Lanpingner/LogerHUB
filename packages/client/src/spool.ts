@@ -9,6 +9,8 @@ export interface SpoolOptions {
   maxBytes?: number
   /** Rows older than this (ms) are dropped. Default 7 days. */
   maxAge?: number
+  /** A claim older than this (ms) is presumed abandoned and reclaimed. Default 60s. */
+  staleClaimMs?: number
   onError?: (e: Error) => void
 }
 
@@ -27,6 +29,7 @@ export interface Spool {
 
 const DEFAULT_MAX_BYTES = 268435456
 const DEFAULT_MAX_AGE = 604800000
+const DEFAULT_STALE_CLAIM_MS = 60000
 const DB_FILE = 'spool.db'
 // SQLITE_CORRUPT and SQLITE_NOTADB: the only failures worth deleting the file for.
 const CORRUPT_CODES = new Set([11, 26])
@@ -74,6 +77,7 @@ function removeDbFiles(file: string): void {
 export function createSpool(opts: SpoolOptions): Spool {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const maxAge = opts.maxAge ?? DEFAULT_MAX_AGE
+  const staleClaimMs = opts.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS
   const report = (e: unknown): void => {
     try { opts.onError?.(toError(e)) } catch { /* a throwing handler must not crash the host */ }
   }
@@ -108,6 +112,9 @@ export function createSpool(opts: SpoolOptions): Spool {
   const unclaim = db.prepare('UPDATE spool SET claimed_at = NULL, attempts = attempts + 1 WHERE id = ?')
   const countAll = db.prepare('SELECT COUNT(*) AS n FROM spool')
   const sizes = db.prepare('SELECT id, length(body) AS size FROM spool ORDER BY created_at, rowid')
+  const reclaim = db.prepare(
+    'UPDATE spool SET claimed_at = NULL, attempts = attempts + 1 WHERE claimed_at IS NOT NULL AND claimed_at < ?',
+  )
   const delOlder = db.prepare('DELETE FROM spool WHERE created_at < ?')
 
   /** Runs fn, converting any failure into an onError report and `fallback`. */
@@ -162,6 +169,8 @@ export function createSpool(opts: SpoolOptions): Spool {
       return guard([], (d) =>
         inTransaction(d, () => {
           const now = Date.now()
+          // Rows claimed by a crashed (or very slow) worker go back in the queue.
+          reclaim.run(now - staleClaimMs)
           const out: Array<{ id: string; batch: BatchFrame }> = []
           for (const row of select.all(n) as Array<{ id: string; body: Uint8Array }>) {
             try {
