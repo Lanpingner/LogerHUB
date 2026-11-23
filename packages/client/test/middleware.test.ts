@@ -4,7 +4,10 @@ import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { createExpressMiddleware } from '../src/middleware'
 import type { Logger } from '../src/types'
-import { appWith, waitFor } from './helpers/fixtures'
+import { appWith, useExpress, waitFor } from './helpers/fixtures'
+
+describe.each([4, 5] as const)('express %i', (major) => {
+beforeAll(() => useExpress(major))
 
 test('logs one line per request with route, status and duration', async () => {
   const { app, entries } = await appWith({})
@@ -89,6 +92,15 @@ test('on-error captures bodies only for failures (default mode)', async () => {
   expect(e[0].meta.http.res.body).toBeUndefined()
   expect(e[1].meta.http.req.body).toEqual({ a: 1 })
   expect(e[1].meta.http.res.body).toMatchObject({ error: 'nope' })
+})
+
+test('on-error treats a 4xx as an error: its bodies are captured', async () => {
+  const { app, entries } = await appWith({})
+  app.post('/bad', (_req, res) => void res.status(400).json({ error: 'invalid' }))
+  await request(app).post('/bad').send({ a: 1 })
+  const [e] = await entries()
+  expect(e.meta.http.req.body).toEqual({ a: 1 })
+  expect(e.meta.http.res.body).toEqual({ error: 'invalid' })
 })
 
 test('captured bodies are redacted and truncated', async () => {
@@ -260,6 +272,38 @@ test('a finished response is logged once, and the close that follows does not du
   expect(await entries()).toHaveLength(1)
 })
 
+test('a Buffer request body is never captured', async () => {
+  const { app, entries } = await appWith({ bodies: 'always' })
+  // What `express.raw()` leaves behind: a Buffer holding an unparsed JSON document.
+  app.post(
+    '/raw',
+    (req, _res, next) => {
+      req.body = Buffer.from('{"a":1,"password":"hunter2"}')
+      next()
+    },
+    (_req, res) => void res.status(500).end(),
+  )
+  await request(app).post('/raw').set('Content-Type', 'application/octet-stream').send('x')
+  const [e] = await entries()
+  expect(JSON.stringify(e)).not.toContain('hunter2')
+  // Express 4's json parser leaves `req.body = {}` where Express 5 leaves it undefined: an
+  // empty object carries nothing, so the contract is "no content", not "no key".
+  expect(e.meta.http.req.body ?? {}).toEqual({})
+  expect(JSON.stringify(e.meta.http.req)).not.toContain('"a"')
+})
+
+test('a streamed, unparsed request body is never captured', async () => {
+  const { app, entries } = await appWith({ bodies: 'always' })
+  app.post('/upload', (req, res) => {
+    req.resume()
+    req.on('end', () => void res.status(500).end())
+  })
+  await request(app).post('/upload').set('Content-Type', 'text/plain').send('password=hunter2')
+  const [e] = await entries()
+  expect(e.meta.http.req.body ?? {}).toEqual({}) // `{}` on Express 4, see above
+  expect(JSON.stringify(e)).not.toContain('hunter2')
+})
+
 test('ordinary log calls never carry kind, even if one is smuggled in', async () => {
   const { log, entries } = await appWith({})
   log.info('plain')
@@ -267,4 +311,5 @@ test('ordinary log calls never carry kind, even if one is smuggled in', async ()
   const e = await entries()
   expect(e).toHaveLength(2)
   for (const x of e) expect('kind' in x).toBe(false)
+})
 })

@@ -10,6 +10,11 @@ const CLIENT_CLOSED = 499
 /** Internal: `logger.expressMiddleware` passes the logger's header allowlist through. */
 type Options = MiddlewareOptions & { headerAllowlist?: string[] }
 
+/** The one rule for "should this exchange's bodies be captured": errors, plus whatever the mode adds. */
+function capturesBodies(mode: string, status: number, sampled: boolean): boolean {
+  return mode === 'always' || (mode !== 'never' && (status >= 400 || sampled))
+}
+
 const isJsonish = (contentType: unknown): boolean =>
   typeof contentType === 'string' && /^\s*[\w.-]+\/([\w.-]+\+)?json\b/i.test(contentType)
 
@@ -70,8 +75,6 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
       emitted = true
       try {
         const status = finished || res.headersSent ? res.statusCode : CLIENT_CLOSED
-        const failed = status >= 400
-        const wantBodies = mode === 'always' || (mode !== 'never' && (failed || sampled))
         const route = routeOf(req)
         const rid = req.headers['x-request-id']
         const http: Record<string, unknown> = {
@@ -85,7 +88,7 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
           res: {},
         }
         if (!finished) http.aborted = true
-        if (wantBodies) {
+        if (capturesBodies(mode, status, sampled)) {
           const reqBody = requestBody(req, maxBytes, opts.allowFields)
           if (reqBody !== undefined) (http.req as Record<string, unknown>).body = reqBody
           const resBody = body?.result(opts.allowFields)
@@ -135,11 +138,9 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
   let ended = false
 
   const wanted = (): boolean => {
-    const failed = res.statusCode >= 400
-    const modeOk = mode === 'always' || (mode !== 'never' && (failed || sampled))
     const encoding = res.getHeader('content-encoding')
     const encoded = encoding !== undefined && String(encoding).toLowerCase() !== 'identity'
-    return modeOk && !encoded && isJsonish(res.getHeader('content-type'))
+    return capturesBodies(mode, res.statusCode, sampled) && !encoded && isJsonish(res.getHeader('content-type'))
   }
 
   const take = (chunk: unknown, encoding: unknown): void => {

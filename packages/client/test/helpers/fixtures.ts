@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import express from 'express'
+import express5 from 'express'
+import express4 from 'express4'
 import type { BatchFrame, LogEntry } from '@logguber/shared'
 import { createLogger } from '../../src/logger'
 import type { Logger, LoggerOptions, MiddlewareOptions } from '../../src/types'
@@ -54,6 +55,12 @@ afterEach(async () => {
   for (const fn of teardown.splice(0)) await fn()
 })
 
+/** The Express major `appWith` builds on by default; the middleware suite sets it per run. */
+export let currentMajor: 4 | 5 = 5
+export const useExpress = (m: 4 | 5): void => {
+  currentMajor = m
+}
+
 /** An entry as the gateway received it: `meta` is untyped JSON, so tests index into it freely. */
 export type Received = Omit<LogEntry, 'meta'> & { meta: any }
 
@@ -62,7 +69,12 @@ export type Received = Omit<LogEntry, 'meta'> & { meta: any }
  * connected to a stub gateway, with entries read from the batches the gateway received.
  * `entries()` flushes first, so call it after the requests have completed.
  */
-export async function appWith(opts: MiddlewareOptions = {}, loggerOpts: Partial<LoggerOptions> = {}) {
+export async function appWith(
+  opts: MiddlewareOptions = {},
+  loggerOpts: Partial<LoggerOptions> = {},
+  major: 4 | 5 = currentMajor,
+) {
+  const express = (major === 4 ? express4 : express5) as typeof express5
   const gateway = await createStubGateway()
   const log: Logger = createLogger({ ...base, url: gateway.url, ...loggerOpts })
   teardown.push(async () => {
