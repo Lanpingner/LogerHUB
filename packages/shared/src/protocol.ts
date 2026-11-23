@@ -27,7 +27,11 @@ export interface BatchFrame {
   t: 'batch'
   id: string
   entries: LogEntry[]
+  /** Entries the client dropped from its in-memory queue since the last batch it sent. */
   droppedSinceLast?: number
+  /** Whole batches the client's spool pruned since the last batch it sent. A different unit
+   *  from `droppedSinceLast`, so the two are reported separately and never summed. */
+  prunedBatchesSinceLast?: number
 }
 
 export interface AckFrame {

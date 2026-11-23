@@ -25,13 +25,6 @@ const CLOSE_TIMEOUT_MS = 1000
 const SETTLE_POLL_MS = 5
 /** A gateway that nacks is overloaded or restarting: wait before offering the batch again. */
 const NACK_RETRY_DELAY_MS = 2000
-/**
- * Reconnect ceiling for log delivery. The transport's own 30s default is right for a lone
- * socket, but here the spool is filling meanwhile: a one-second blip must not cost half a
- * minute of replay delay.
- */
-const RECONNECT_BACKOFF = { baseMs: 500, maxMs: 3000 }
-
 const toError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
 
 /** Finite integer >= 1, otherwise the fallback. */
@@ -242,7 +235,7 @@ export function createCore(opts: LoggerOptions): LoggerCore {
     apiKey: opts.apiKey,
     service: opts.service,
     env: opts.env,
-    backoff: RECONNECT_BACKOFF,
+    backoff: opts.backoff,
     onAck,
     onNack,
     onState,
@@ -251,12 +244,13 @@ export function createCore(opts: LoggerOptions): LoggerCore {
   })
 
   function onBatch(entries: LogEntry[], droppedSinceLast: number): void {
-    // The batcher's count resets on read; the store's is cumulative, so take the delta.
+    // The batcher counts dropped entries and resets on read; the store counts pruned batches
+    // and never resets, so take its delta. Two units: reported side by side, never summed.
     const prunedDelta = Math.max(0, store.prunedCount() - reportedPruned)
     reportedPruned += prunedDelta
-    const dropped = droppedSinceLast + prunedDelta
     const batch: BatchFrame = { t: 'batch', id: ulid(), entries }
-    if (dropped > 0) batch.droppedSinceLast = dropped
+    if (droppedSinceLast > 0) batch.droppedSinceLast = droppedSinceLast
+    if (prunedDelta > 0) batch.prunedBatchesSinceLast = prunedDelta
     // `always` keeps a copy before the wire; otherwise the store is only for what cannot go now,
     // and a non-empty store takes precedence so replay stays oldest first.
     if (closed || mode === 'always' || store.count() > 0 || !transport.send(batch)) {

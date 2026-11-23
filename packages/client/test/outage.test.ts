@@ -26,7 +26,14 @@ afterEach(async () => {
   for (const g of gateways.splice(0)) await g.close()
 })
 
-const opts = (o: Partial<LoggerOptions> & { url: string }): LoggerOptions => ({ ...base, ...o })
+// These tests take a gateway away and give it back within a second or two. The product's
+// reconnect ceiling is the transport's 30s, which is right for a real outage and far too slow
+// here, so each logger configures its own short ceiling.
+const opts = (o: Partial<LoggerOptions> & { url: string }): LoggerOptions => ({
+  ...base,
+  backoff: { baseMs: 50, maxMs: 250 },
+  ...o,
+})
 
 /** One long-lived reader on the spool file: WAL lets it see the logger's commits. */
 function spoolRows(dir: string): { count(): number; close(): void } {
@@ -140,7 +147,7 @@ test('rows pruned from the spool are reported to the gateway exactly once', asyn
   await waitFor(() => g.conns.length >= 1)
   await sleep(100)                                   // hello landed: batches go straight out
   log.info('a'); await log.flush()
-  expect(g.batches[0].droppedSinceLast ?? 0).toBe(0)
+  expect(g.batches[0].prunedBatchesSinceLast ?? 0).toBe(0)
 
   await g.stop()
   log.info('lost'); await log.flush()                // spooled, then pruned for size
@@ -150,10 +157,11 @@ test('rows pruned from the spool are reported to the gateway exactly once', asyn
 
   log.info('c'); await log.flush()
   const c = g.batches.find((b) => b.entries.some((e) => e.msg === 'c'))
-  expect(c?.droppedSinceLast).toBe(1)
+  expect(c?.prunedBatchesSinceLast).toBe(1)
+  expect(c?.droppedSinceLast).toBeUndefined()        // pruned batches are not dropped entries
   log.info('d'); await log.flush()
   const d = g.batches.find((b) => b.entries.some((e) => e.msg === 'd'))
-  expect(d?.droppedSinceLast ?? 0).toBe(0)           // never double-reported
+  expect(d?.prunedBatchesSinceLast ?? 0).toBe(0)     // never double-reported
 })
 
 test('replays more spooled batches than the ack window, each exactly once', async () => {

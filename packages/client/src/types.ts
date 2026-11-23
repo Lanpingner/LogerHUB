@@ -33,6 +33,8 @@ export interface LoggerOptions {
   env: string
   spool?: SpoolConfig
   batch?: BatchConfig
+  /** Reconnect delay is `min(maxMs, baseMs * 2 ** attempt)` with full jitter. Default 500 / 30000. */
+  backoff?: { baseMs: number; maxMs: number }
   /** Dimensions stamped on every entry. */
   dims?: Record<string, string>
   /** Extends the default redacted body keys; it never replaces them. */

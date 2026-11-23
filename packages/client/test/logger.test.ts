@@ -131,6 +131,7 @@ test('reports the batcher drop count once, on the next batch', async () => {
   for (const m of ['a', 'b', 'c', 'd', 'e']) log.info(m)
   await log.flush()
   expect(g.batches[0].droppedSinceLast).toBe(3)
+  expect(g.batches[0].prunedBatchesSinceLast).toBeUndefined()   // entries, not batches
   log.info('f')
   await log.flush()
   expect(g.batches[1].droppedSinceLast ?? 0).toBe(0)
