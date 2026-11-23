@@ -30,7 +30,8 @@ function sane(n: number | undefined, fallback: number): number {
 export function createBatcher(opts: BatcherOptions): Batcher {
   const maxQueue = sane(opts.maxQueue, DEFAULT_MAX_QUEUE)
   const maxMs = sane(opts.maxMs, DEFAULT_MAX_MS)
-  let cutSize = sane(opts.maxEntries, 1)
+  const configuredCutSize = sane(opts.maxEntries, 1)
+  let cutSize = configuredCutSize
   let queue: LogEntry[] = []
   let dropped = 0
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -101,8 +102,10 @@ export function createBatcher(opts: BatcherOptions): Batcher {
     },
     flush,
     setLimits(l) {
+      // Relative to the configured size, not the current one: a gateway that announces a larger
+      // limit after a reconnect must be able to restore it, but never exceed what was configured.
       if (Number.isFinite(l.maxEntriesPerBatch) && l.maxEntriesPerBatch >= 1) {
-        cutSize = Math.min(cutSize, Math.floor(l.maxEntriesPerBatch))
+        cutSize = Math.min(configuredCutSize, Math.floor(l.maxEntriesPerBatch))
       }
     },
     stats: () => ({ queued: queue.length, dropped }),

@@ -212,3 +212,67 @@ test('an unusable spool directory leaves a working memory-only logger', async ()
   expect(g.batches[0].entries[0].msg).toBe('memory only')
   expect(seen.length).toBeGreaterThan(0)
 })
+
+test('a hostile entry costs the entry, not the caller', async () => {
+  const seen: Error[] = []
+  const g = await gateway()
+  const log = track(createLogger(opts({ url: g.url, onError: (e) => seen.push(e) })))
+  const hostileMsg = { toString: () => { throw new Error('toString exploded') } }
+  const hostileDims = Object.defineProperty({}, 'user_id', {
+    enumerable: true,
+    get: () => { throw new Error('getter exploded') },
+  })
+  expect(() => log.log('info', hostileMsg as unknown as string)).not.toThrow()
+  expect(() => log.info('ok', { dims: hostileDims as Record<string, string> })).not.toThrow()
+  expect(() => log.child({ dims: hostileDims as Record<string, string> }).info('child')).not.toThrow()
+  log.info('survivor')
+  await log.flush()
+  const entries = g.batches.flatMap((b) => b.entries)
+  // An unusable message costs the entry; unusable dimensions cost only the dimensions.
+  expect(entries.map((e) => e.msg)).toEqual(['ok', 'child', 'survivor'])
+  expect(entries.every((e) => e.dims === undefined)).toBe(true)
+  // Two reports, not three: the second identical dimension failure is the rate limiter's job.
+  expect(seen.map((e) => e.message)).toEqual(['toString exploded', 'getter exploded'])
+})
+
+test('createSink survives a hostile record from a foreign logger', async () => {
+  const seen: Error[] = []
+  const g = await gateway()
+  const sink = track(createSink(opts({ url: g.url, onError: (e) => seen.push(e) })))
+  const ts = new Date().toISOString()
+  const hostileMsg = { toString: () => { throw new Error('pino toString exploded') } }
+  const hostileDims = Object.defineProperty({}, 'user_id', {
+    enumerable: true,
+    get: () => { throw new Error('pino getter exploded') },
+  })
+  expect(() => sink.write({ ts, level: 'info', msg: hostileMsg as unknown as string })).not.toThrow()
+  expect(() => sink.write({ ts, level: 'info', msg: 'x', dims: hostileDims as Record<string, string> })).not.toThrow()
+  sink.write({ ts, level: 'info', msg: 'survivor' })
+  await sink.flush()
+  const entries = g.batches.flatMap((b) => b.entries)
+  expect(entries.map((e) => e.msg)).toEqual(['x', 'survivor'])
+  expect(entries.every((e) => e.dims === undefined)).toBe(true)
+  expect(seen.map((e) => e.message)).toEqual(['pino toString exploded', 'pino getter exploded'])
+})
+
+test('a reconnect that announces a larger limit restores the configured cut size', async () => {
+  const hello = { maxEntriesPerBatch: 2 }
+  const g = await gateway({ hello })                 // the stub reads this on every connection
+  const log = track(createLogger(opts({ url: g.url, batch: { maxEntries: 3 },
+                                        backoff: { baseMs: 50, maxMs: 250 } })))
+  log.info('opens the stream')
+  await log.flush()
+  log.info('a'); log.info('b'); log.info('c')
+  await log.flush()
+  expect(g.batches[1].entries).toHaveLength(2)       // the gateway asked for 2
+
+  hello.maxEntriesPerBatch = 500
+  await g.stop()
+  await g.start()
+  await waitFor(() => g.conns.length >= 2, 5000)
+  await sleep(100)                                   // the second hello has landed
+  log.info('d'); log.info('e'); log.info('f')
+  await log.flush()
+  const sizes = g.batches.slice(3).map((b) => b.entries.length)
+  expect(sizes).toEqual([3])                         // back to the configured 3, not stuck at 2
+})

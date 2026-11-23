@@ -99,7 +99,11 @@ test('close spools a batch that was sent but never acked', async () => {
   const g = await gateway({ onBatch: (b, c) => { if (acked++ === 0) c.send({ t: 'ack', id: b.id }) } })
   const log = createLogger(opts({ url: g.url, spool: { dir } }))
   log.info('opens the stream'); await log.flush()
-  log.info('in flight'); await log.close()
+  log.info('in flight'); await log.flush()
+  const mid = createSpool({ dir })
+  expect(mid.count()).toBe(0)        // on-failure: a slow ack on a healthy stream stays in memory
+  mid.close()
+  await log.close()
   const s = createSpool({ dir })
   expect(s.claim(10).flatMap((c) => c.batch.entries).map((e) => e.msg)).toEqual(['in flight'])
   s.close()
@@ -185,4 +189,73 @@ test('replays more spooled batches than the ack window, each exactly once', asyn
   expect(new Set(msgs).size).toBe(msgs.length)
   expect(g.batches.every((b) => b.entries.length === 1)).toBe(true)
   for (let i = 0; i < 10; i++) expect(msgs).toContain(`spooled-${i}`)
+})
+
+test('a retry floor pushed out by a second nack still fires on its own', async () => {
+  const dir = tmp()
+  let seen = 0
+  // Nacks the first offer of each of the two entries, the second one 100ms late so it pushes the
+  // retry floor past the timer already armed. Nothing else happens afterwards: only the logger's
+  // own re-arming can get these batches delivered.
+  const g = await gateway({
+    hello: { maxEntriesPerBatch: 1 },
+    onBatch: (b, c) => {
+      seen++
+      const nack = { t: 'nack' as const, id: b.id, reason: 'overloaded', retryable: true }
+      if (seen === 2) c.send(nack)
+      else if (seen === 3) setTimeout(() => c.send(nack), 100)
+      else c.send({ t: 'ack', id: b.id })
+    },
+  })
+  const log = track(createLogger(opts({ url: g.url, spool: { dir } })))
+  log.info('opens the stream'); await log.flush()
+  log.info('a'); log.info('b')
+  const rows = spoolRows(dir)
+  try {
+    await waitFor(() => rows.count() === 2, 3000)   // both nacked and back on disk
+    await waitFor(() => rows.count() === 0, 6000)   // and redelivered with no external event
+  } finally {
+    rows.close()
+  }
+  // A nacked batch is offered again, so the gateway sees the frame twice — under the same id
+  // both times, which is what lets it deduplicate.
+  for (const msg of ['a', 'b']) {
+    const ids = g.batches.filter((b) => b.entries.some((e) => e.msg === msg)).map((b) => b.id)
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(1)
+  }
+})
+
+test('close hands back the rows it had claimed so the next process replays at once', async () => {
+  const dir = tmp()
+  let acked = 0
+  const g = await gateway({ onBatch: (b, c) => { if (acked++ === 0) c.send({ t: 'ack', id: b.id }) } })
+  // `always` makes the batch store-sourced: its row exists and is claimed while in flight.
+  const log = createLogger(opts({ url: g.url, spool: { dir, mode: 'always' } }))
+  log.info('opens the stream'); await log.flush()
+  log.info('claimed'); await log.close()
+  const s = createSpool({ dir })
+  // Claimable immediately: no waiting out the 60s claim expiry on a rolling deploy.
+  expect(s.claim(10).flatMap((c) => c.batch.entries).map((e) => e.msg)).toEqual(['claimed'])
+  s.close()
+})
+
+test("a sibling worker's backlog does not push a healthy worker through the disk", async () => {
+  const dir = tmp()
+  const idle = await gateway({ onBatch: () => {} })            // never acks
+  // The sibling leaves a claimed, undelivered row in the shared spool directory.
+  const sibling = track(createLogger(opts({ url: idle.url, spool: { dir, mode: 'always' } })))
+  sibling.info('sibling work')
+  await sibling.flush()
+  expect(createSpool({ dir }).count()).toBe(1)
+
+  const g = await gateway()
+  const log = track(createLogger(opts({ url: g.url, spool: { dir } })))
+  log.info('mine')
+  const started = Date.now()
+  await log.flush()
+  // Its own batch went straight out and its flush settled at once, rather than waiting for a
+  // backlog that is not this process's to drain.
+  expect(g.batches.flatMap((b) => b.entries).map((e) => e.msg)).toEqual(['mine'])
+  expect(Date.now() - started).toBeLessThan(300)
 })

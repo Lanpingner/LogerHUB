@@ -184,3 +184,17 @@ test('maxQueue defaults to 10000 when omitted', () => {
   for (let i = 0; i < 10_001; i++) b.push(entry('x'))
   expect(b.stats()).toEqual({ queued: 10_000, dropped: 1 })
 })
+
+test('setLimits can restore the configured cut size after a smaller limit', () => {
+  const onBatch = vi.fn()
+  const b = createBatcher({ maxEntries: 3, maxMs: 1000, maxQueue: 100, onBatch })
+  b.setLimits({ maxEntriesPerBatch: 1 })
+  b.push(entry('a'))
+  expect(onBatch).toHaveBeenCalledTimes(1)
+  b.setLimits({ maxEntriesPerBatch: 50 })   // a reconnect to a gateway with room again
+  b.push(entry('b')); b.push(entry('c'))
+  expect(onBatch).toHaveBeenCalledTimes(1)  // still accumulating towards the configured 3
+  b.push(entry('d'))
+  expect(onBatch).toHaveBeenCalledTimes(2)
+  expect((onBatch.mock.calls[1][0] as unknown[]).length).toBe(3)
+})

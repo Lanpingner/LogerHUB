@@ -60,7 +60,18 @@ function createReporter(hook?: (e: Error) => void): (source: string, e: unknown)
     const prev = lastSeen.get(key)
     if (prev !== undefined && now - prev < ERROR_INTERVAL_MS) return
     if (lastSeen.size >= ERROR_KEY_LIMIT) {
-      for (const [k, t] of lastSeen) if (now - t >= ERROR_INTERVAL_MS) lastSeen.delete(k)
+      let evicted = 0
+      for (const [k, t] of lastSeen) {
+        if (now - t < ERROR_INTERVAL_MS) continue
+        lastSeen.delete(k)
+        evicted++
+      }
+      // Churning through distinct causes faster than the interval must still not grow the map:
+      // a Map iterates in insertion order, so the first key is the oldest one we hold.
+      if (evicted === 0) {
+        const oldest = lastSeen.keys().next().value
+        if (oldest !== undefined) lastSeen.delete(oldest)
+      }
     }
     lastSeen.set(key, now)
     inside = true
@@ -82,7 +93,6 @@ interface Store {
   ack(id: string): void
   /** Not delivered after all: make it claimable again. */
   release(id: string): void
-  count(): number
   /** Cumulative batches lost to the store's own bounds. Never resets. */
   prunedCount(): number
   close(): void
@@ -94,7 +104,6 @@ function spoolStore(spool: Spool): Store {
     claim: (n) => spool.claim(n).map((r) => r.batch),
     ack: (id) => spool.ack(id),
     release: (id) => spool.release(id),
-    count: () => spool.count(),
     prunedCount: () => spool.prunedCount(),
     close: () => spool.close(),
   }
@@ -132,7 +141,6 @@ function memoryStore(maxBatches: number): Store {
       claimed.delete(id)
       insert(b)
     },
-    count: () => queue.length + claimed.size,
     prunedCount: () => pruned,
     close() {
       queue.length = 0
@@ -147,14 +155,26 @@ function timestamp(v: unknown): string {
   return typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : new Date().toISOString()
 }
 
-/** Keeps string dimensions, stringifies the other primitives, drops everything else. */
-function mergeDims(...sources: Array<Record<string, unknown> | undefined>): Record<string, string> {
+/**
+ * Keeps string dimensions, stringifies the other primitives, drops everything else. Fail-closed
+ * per source: a throwing getter or a hostile proxy costs that source's dimensions and is
+ * reported, never the log call. Enumerating a caller's object is the one step here that can
+ * run foreign code.
+ */
+function mergeDims(
+  sources: Array<Record<string, unknown> | undefined>,
+  onError?: (e: unknown) => void,
+): Record<string, string> {
   const out: Record<string, string> = {}
   for (const source of sources) {
     if (source === null || typeof source !== 'object') continue
-    for (const [k, v] of Object.entries(source)) {
-      if (typeof v === 'string') out[k] = v
-      else if (typeof v === 'number' || typeof v === 'boolean') out[k] = String(v)
+    try {
+      for (const [k, v] of Object.entries(source)) {
+        if (typeof v === 'string') out[k] = v
+        else if (typeof v === 'number' || typeof v === 'boolean') out[k] = String(v)
+      }
+    } catch (e) {
+      onError?.(e)
     }
   }
   return out
@@ -178,6 +198,8 @@ export interface RawEntry {
 export interface LoggerCore {
   /** Normalises, redacts and enqueues. Synchronous, non-blocking, and never throws. */
   accept(raw: RawEntry, dims?: Record<string, unknown>): void
+  /** `child()`'s merge, done here so a hostile source is reported rather than thrown. */
+  mergeChildDims(parent: Record<string, string>, extra?: Record<string, unknown>): Record<string, string>
   flush(): Promise<void>
   close(): Promise<void>
 }
@@ -189,7 +211,7 @@ export interface LoggerCore {
  */
 export function createCore(opts: LoggerOptions): LoggerCore {
   const report = createReporter(opts.onError)
-  const baseDims = mergeDims(opts.dims)
+  const baseDims = mergeDims([opts.dims], (e) => report('dims', e))
   const mode = opts.spool?.mode ?? 'on-failure'
   const maxEntries = sane(opts.batch?.maxEntries, DEFAULT_MAX_ENTRIES)
   const maxQueue = sane(opts.batch?.maxQueue, DEFAULT_MAX_QUEUE)
@@ -216,6 +238,12 @@ export function createCore(opts: LoggerOptions): LoggerCore {
   let reportedPruned = 0
   let retryNotBefore = 0
   let retryTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * This process has batches in the store. Scoped to our own work on purpose: a sibling
+   * worker's backlog in a shared spool directory must not push a healthy worker's live
+   * batches through the disk, nor keep its `flush` waiting.
+   */
+  let stored = false
   let draining = false
   let closed = false
   let closing: Promise<void> | undefined
@@ -251,14 +279,20 @@ export function createCore(opts: LoggerOptions): LoggerCore {
     const batch: BatchFrame = { t: 'batch', id: ulid(), entries }
     if (droppedSinceLast > 0) batch.droppedSinceLast = droppedSinceLast
     if (prunedDelta > 0) batch.prunedBatchesSinceLast = prunedDelta
-    // `always` keeps a copy before the wire; otherwise the store is only for what cannot go now,
-    // and a non-empty store takes precedence so replay stays oldest first.
-    if (closed || mode === 'always' || store.count() > 0 || !transport.send(batch)) {
-      store.push(batch)
+    // `always` keeps a copy before the wire; otherwise the store is only for what cannot go
+    // now, and anything of ours already in it takes precedence so replay stays oldest first.
+    if (closed || mode === 'always' || stored || !transport.send(batch)) {
+      keep(batch)
       drain()
       return
     }
     sent.set(batch.id, { batch, fromStore: false })
+  }
+
+  /** Every write to the store goes through here, so the hot-path flag cannot drift. */
+  function keep(batch: BatchFrame): void {
+    store.push(batch)
+    stored = true
   }
 
   function onHello(h: HelloFrame): void {
@@ -287,32 +321,47 @@ export function createCore(opts: LoggerOptions): LoggerCore {
       store.ack(f.id) // a permanent rejection: retrying it forever would block everything behind it
       return
     }
-    if (rec !== undefined && !rec.fromStore) store.push(rec.batch)
-    else store.release(f.id)
+    if (rec !== undefined && !rec.fromStore) keep(rec.batch)
+    else {
+      store.release(f.id)
+      stored = true
+    }
     retryNotBefore = Date.now() + NACK_RETRY_DELAY_MS
-    scheduleRetry()
+    scheduleRetry(NACK_RETRY_DELAY_MS)
   }
 
   /** One pending nudge, so a nacking gateway is retried on a timer rather than in a loop. */
-  function scheduleRetry(): void {
+  function scheduleRetry(delayMs: number): void {
     if (closed || retryTimer !== undefined) return
     retryTimer = setTimeout(() => {
       retryTimer = undefined
       drain()
-    }, NACK_RETRY_DELAY_MS)
+    }, Math.max(0, delayMs))
     retryTimer.unref?.()
   }
 
   /** Sends stored batches oldest first, up to the free ack window. Event-driven: never a spin. */
   function drain(): void {
-    if (closed || draining || transport.state() !== 'open' || Date.now() < retryNotBefore) return
+    if (closed || draining || transport.state() !== 'open') return
+    const wait = retryNotBefore - Date.now()
+    if (wait > 0) {
+      // A later nack can push the floor past the pending timer, so re-arm for the remainder:
+      // without this the store waits for an unrelated event that a quiet gateway never sends.
+      scheduleRetry(wait)
+      return
+    }
     draining = true
     try {
       for (;;) {
         const free = ackWindow - transport.inFlight()
         if (free <= 0) return
         const claimed = store.claim(free)
-        if (claimed.length === 0) return
+        if (claimed.length === 0) {
+          // Nothing claimable and nothing of ours outstanding: our work is done, so live
+          // batches may go straight to the wire again without overtaking anything.
+          if (transport.inFlight() === 0) stored = false
+          return
+        }
         for (let i = 0; i < claimed.length; i++) {
           const batch = claimed[i]
           if (transport.send(batch)) {
@@ -334,7 +383,7 @@ export function createCore(opts: LoggerOptions): LoggerCore {
   /** Waits for the store to empty and every sent batch to be acked, or for the deadline. */
   async function settle(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs
-    while (store.count() > 0 || transport.inFlight() > 0) {
+    while (stored || transport.inFlight() > 0) {
       if (Date.now() >= deadline) return
       await delay(SETTLE_POLL_MS)
       drain()
@@ -346,11 +395,19 @@ export function createCore(opts: LoggerOptions): LoggerCore {
    * store already is; one sourced from memory is lost on exit, which is exactly the SIGTERM
    * case the spool exists for.
    */
-  function storeInFlight(): void {
+  function storeInFlight(final: boolean): void {
+    // On a healthy stream the ack is still coming, and `on-failure` promises the disk stays
+    // untouched; only a last chance (closing, or a stream that is down) earns a write.
+    if (!final && transport.state() === 'open') return
     for (const batch of transport.inFlightBatches()) {
       const rec = sent.get(batch.id)
-      if (rec?.fromStore === true) continue
-      store.push(batch)
+      if (rec?.fromStore === true) {
+        // Its row exists but is claimed by a process that is about to exit. Hand it back, or
+        // the next one waits out the claim expiry before replaying it.
+        if (final) store.release(batch.id)
+        continue
+      }
+      keep(batch)
       if (rec !== undefined) rec.fromStore = true // so a late ack deletes the row we just wrote
     }
   }
@@ -362,29 +419,42 @@ export function createCore(opts: LoggerOptions): LoggerCore {
     closed = true
     if (retryTimer !== undefined) clearTimeout(retryTimer)
     retryTimer = undefined
-    storeInFlight() // before close(), which forgets the transport's pending batches
+    storeInFlight(true) // before close(), which forgets the transport's pending batches
     await transport.close()
     store.close()
   }
 
+  /** Builds, redacts and queues one entry. Only `accept` calls it, and only inside a try. */
+  function enqueue(raw: RawEntry, dims?: Record<string, unknown>): void {
+    const entry: LogEntry = {
+      ts: timestamp(raw.ts),
+      level: isLevel(raw.level) ? raw.level : 'info',
+      msg: typeof raw.msg === 'string' ? raw.msg : String(raw.msg ?? ''),
+    }
+    if (raw.kind === 'request') entry.kind = 'request'
+    const merged = mergeDims([baseDims, dims, raw.dims], (e) => report('dims', e))
+    if (Object.keys(merged).length > 0) entry.dims = merged
+    if (raw.meta !== undefined) {
+      // Redaction and truncation happen here, before the queue, so no secret ever reaches
+      // the network or the disk.
+      const meta = truncateJson(redactBody(raw.meta, { redactKeys: opts.redactKeys }))
+      if (meta !== undefined) entry.meta = asRecord(meta)
+    }
+    batcher.push(entry)
+  }
+
   return {
     accept(raw, dims) {
-      const entry: LogEntry = {
-        ts: timestamp(raw.ts),
-        level: isLevel(raw.level) ? raw.level : 'info',
-        msg: typeof raw.msg === 'string' ? raw.msg : String(raw.msg ?? ''),
+      try {
+        enqueue(raw, dims)
+      } catch (e) {
+        // A hostile `msg.toString`, dimension getter or proxy must cost the entry, never the
+        // caller's request. Reachable through createSink(), where a foreign logger built the record.
+        report('accept', e)
       }
-      if (raw.kind === 'request') entry.kind = 'request'
-      const merged = mergeDims(baseDims, dims, raw.dims)
-      if (Object.keys(merged).length > 0) entry.dims = merged
-      if (raw.meta !== undefined) {
-        // Redaction and truncation happen here, before the queue, so no secret ever reaches
-        // the network or the disk.
-        const meta = truncateJson(redactBody(raw.meta, { redactKeys: opts.redactKeys }))
-        if (meta !== undefined) entry.meta = asRecord(meta)
-      }
-      batcher.push(entry)
     },
+
+    mergeChildDims: (parent, extra) => mergeDims([parent, extra], (e) => report('dims', e)),
 
     async flush() {
       if (closing !== undefined) {
@@ -394,7 +464,7 @@ export function createCore(opts: LoggerOptions): LoggerCore {
       batcher.flush()
       drain()
       await settle(FLUSH_TIMEOUT_MS)
-      storeInFlight()
+      storeInFlight(false)
     },
 
     close() {
@@ -406,8 +476,10 @@ export function createCore(opts: LoggerOptions): LoggerCore {
 
 /** `owned` is false for a child: it shares the pipeline and must not be able to close it. */
 function wrap(core: LoggerCore, dims: Record<string, string>, owned: boolean): Logger {
+  // The call's own dimensions travel on the entry so that merging them — the one step that can
+  // run a caller's getter — happens inside `accept`, where nothing escapes.
   const log = (level: string, msg: string, o?: LogOptions): void => {
-    core.accept({ level, msg, meta: o?.meta }, o?.dims === undefined ? dims : mergeDims(dims, o.dims))
+    core.accept({ level, msg, dims: o?.dims, meta: o?.meta }, dims)
   }
   return {
     log,
@@ -416,7 +488,7 @@ function wrap(core: LoggerCore, dims: Record<string, string>, owned: boolean): L
     warn: (msg, o) => log('warn', msg, o),
     error: (msg, o) => log('error', msg, o),
     fatal: (msg, o) => log('fatal', msg, o),
-    child: (o) => wrap(core, mergeDims(dims, o?.dims), false),
+    child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false),
     flush: () => core.flush(),
     close: owned ? () => core.close() : () => Promise.resolve(),
   }
