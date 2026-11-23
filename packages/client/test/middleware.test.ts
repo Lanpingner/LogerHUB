@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -286,6 +287,12 @@ test('an unparsed request emits no req.body key at all, on either Express major'
   expect('body' in e.meta.http.res).toBe(false)
 })
 
+test('a healthy capture does not carry body_capture_failed', async () => {
+  const { app, entries } = await appWith({ bodies: 'always' })
+  await request(app).post('/echo').send({ a: 1 })
+  expect('body_capture_failed' in (await entries())[0].meta.http).toBe(false)
+})
+
 test('a Buffer request body is never captured', async () => {
   const { app, entries } = await appWith({ bodies: 'always' })
   // What `express.raw()` leaves behind: a Buffer holding an unparsed JSON document.
@@ -344,6 +351,7 @@ test('a req.body getter that throws costs the bodies, never the line', async () 
   expect(e).toHaveLength(1)
   expect(e[0].meta.http).toMatchObject({ route: '/hostile', status: 500 })
   expect('body' in e[0].meta.http.req).toBe(false)
+  expect(e[0].meta.http.body_capture_failed).toBe(true)
 })
 
 /** Raw response bytes, so a test can compare exactly what the client received. */
@@ -408,8 +416,10 @@ describe('response wrapping leaves the response intact', () => {
   })
 
   test('behind compression: the client gets the right bytes and no body is captured', async () => {
-    const { app, entries } = await appWith({ bodies: 'always' })
-    const payload = { pad: 'z'.repeat(5000) }
+    // A small cap against a large payload: if the content-encoding skip were removed, the
+    // compressed bytes would overflow it and a `_truncated` marker would appear.
+    const { app, entries } = await appWith({ bodies: 'always', maxBodyBytes: 64 })
+    const payload = { pad: randomBytes(1000).toString('hex') } // incompressible, so gzip output exceeds the cap
     app.get('/zip', compression({ threshold: 0 }), (_req, res) => void res.json(payload))
     const res = await request(app).get('/zip').set('Accept-Encoding', 'gzip')
     expect(res.headers['content-encoding']).toBe('gzip')

@@ -109,7 +109,9 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
             const resBody = body?.result(opts.allowFields)
             if (resBody !== undefined) (http.res as Record<string, unknown>).body = resBody
           } catch {
-            // headers and timing still go out
+            // Headers and timing still go out. The flag makes the gap visible: one body may
+            // have been captured and the other not, and the line would otherwise look complete.
+            http.body_capture_failed = true
           }
         }
         logger.log(levelFor(status), `${req.method} ${route} ${status}`, {
@@ -158,6 +160,8 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
   let ended = false
 
   const wanted = (): boolean => {
+    // Load-bearing even though compressed bytes would fail to parse: without this skip every
+    // compressed response would be buffered up to the cap and large ones stamped `_truncated`.
     const encoding = res.getHeader('content-encoding')
     const encoded = encoding !== undefined && String(encoding).toLowerCase() !== 'identity'
     return capturesBodies(mode, res.statusCode, sampled) && !encoded && isJsonish(res.getHeader('content-type'))
@@ -207,6 +211,7 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
 
   return {
     result(allowFields) {
+      // `_bytes` here is raw bytes on the wire; truncateJson's is the serialised redacted value.
       if (overflow) return { _truncated: true, _bytes: total }
       if (decision !== 'capture' || chunks.length === 0) return undefined
       try {
