@@ -7,6 +7,8 @@ export interface BatcherOptions {
   maxQueue?: number
   /** `droppedSinceLast` is reported exactly once, then reset. */
   onBatch: (entries: LogEntry[], droppedSinceLast: number) => void
+  /** Called when onBatch throws; the failed batch is counted as dropped. */
+  onError?: (e: Error) => void
 }
 
 export interface Batcher {
@@ -18,10 +20,17 @@ export interface Batcher {
 }
 
 const DEFAULT_MAX_QUEUE = 10_000
+const DEFAULT_MAX_MS = 1000
+
+/** Finite integer >= 1, otherwise the fallback. */
+function sane(n: number | undefined, fallback: number): number {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback
+}
 
 export function createBatcher(opts: BatcherOptions): Batcher {
-  const maxQueue = Math.max(1, opts.maxQueue ?? DEFAULT_MAX_QUEUE)
-  let cutSize = Math.max(1, opts.maxEntries)
+  const maxQueue = sane(opts.maxQueue, DEFAULT_MAX_QUEUE)
+  const maxMs = sane(opts.maxMs, DEFAULT_MAX_MS)
+  let cutSize = sane(opts.maxEntries, 1)
   let queue: LogEntry[] = []
   let dropped = 0
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -39,17 +48,24 @@ export function createBatcher(opts: BatcherOptions): Batcher {
     dropped = 0
     try {
       opts.onBatch(entries, count)
-    } catch {
-      // Never throw into application code.
+    } catch (err) {
+      // Never throw into application code. The batch is lost, but visibly:
+      // restore the drop count and add the failed entries to it.
+      dropped += count + entries.length
+      try {
+        opts.onError?.(err instanceof Error ? err : new Error(String(err)))
+      } catch {
+        // onError must not throw into application code either.
+      }
     }
   }
 
-  /** Cut one batch of at most cutSize entries. */
+  /** Cut one batch (partial if timer-driven), then keep cutting full batches. */
   function cut(): void {
     clearTimer()
     if (queue.length === 0) return
-    const entries = queue.splice(0, cutSize)
-    emit(entries)
+    emit(queue.splice(0, cutSize))
+    while (queue.length >= cutSize) emit(queue.splice(0, cutSize))
     if (queue.length > 0) arm()
   }
 
@@ -58,7 +74,7 @@ export function createBatcher(opts: BatcherOptions): Batcher {
     timer = setTimeout(() => {
       timer = undefined
       cut()
-    }, opts.maxMs)
+    }, maxMs)
     timer.unref?.()
   }
 
@@ -71,7 +87,10 @@ export function createBatcher(opts: BatcherOptions): Batcher {
 
   return {
     push(e) {
-      if (closed) return
+      if (closed) {
+        dropped++
+        return
+      }
       queue.push(e)
       if (queue.length > maxQueue) {
         queue.shift()
