@@ -1,4 +1,4 @@
-import type { IncomingMessage } from 'node:http'
+import { createServer, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { HELLO_DEFAULTS, type BatchFrame, type HelloFrame, type ServerFrame } from '@logguber/shared'
@@ -18,6 +18,10 @@ export interface StubGatewayOptions {
   hello?: Partial<HelloFrame>
   /** Close every new connection with this code immediately after upgrade. */
   rejectWith?: number
+  /** Refuse the HTTP upgrade itself with this status (e.g. 401). */
+  refuseUpgradeWith?: number
+  /** Accept connections but never send `hello`. */
+  withholdHello?: boolean
 }
 
 export interface StubGateway {
@@ -26,6 +30,8 @@ export interface StubGateway {
   conns: StubConn[]
   /** Change (or clear) the reject code for connections accepted from now on. */
   rejectWith(code: number | undefined): void
+  /** Raw frames a client sent that were not valid JSON, for tests that send garbage. */
+  garbage: string[]
   /** Final teardown. */
   close(): Promise<void>
   /** Kill the server and every connection, keeping the port for `start()`. */
@@ -36,16 +42,34 @@ export interface StubGateway {
 export async function createStubGateway(opts: StubGatewayOptions = {}): Promise<StubGateway> {
   const batches: BatchFrame[] = []
   const conns: StubConn[] = []
+  const garbage: string[] = []
   let reject = opts.rejectWith
   let wss: WebSocketServer | undefined
+  let closed = false
+  let httpServer: ReturnType<typeof createServer> | undefined
+  const open = new Set<import('node:net').Socket>()
   let port = 0
 
   const listen = (): Promise<void> =>
     new Promise((resolve, reject_) => {
-      const s = new WebSocketServer({ host: '127.0.0.1', port })
-      s.once('error', reject_)
-      s.once('listening', () => {
-        port = (s.address() as AddressInfo).port
+      const http = createServer()
+      httpServer = http
+      const s = new WebSocketServer({
+        server: http,
+        verifyClient: opts.refuseUpgradeWith
+          ? (_info, cb) => cb(false, opts.refuseUpgradeWith, 'refused')
+          : undefined,
+      })
+      http.on('connection', (sock) => {
+        open.add(sock)
+        sock.once('close', () => open.delete(sock))
+      })
+      http.once('error', (e) => {
+        http.close() // do not leave a half-created server behind
+        reject_(e)
+      })
+      http.listen(port, '127.0.0.1', () => {
+        port = (http.address() as AddressInfo).port
         wss = s
         resolve()
       })
@@ -64,9 +88,15 @@ export async function createStubGateway(opts: StubGatewayOptions = {}): Promise<
           ws.close(reject)
           return
         }
-        conn.send({ ...HELLO_DEFAULTS, ...opts.hello, t: 'hello' })
+        if (!opts.withholdHello) conn.send({ ...HELLO_DEFAULTS, ...opts.hello, t: 'hello' })
         ws.on('message', (raw) => {
-          const frame = JSON.parse(raw.toString()) as BatchFrame
+          let frame: BatchFrame
+          try {
+            frame = JSON.parse(raw.toString()) as BatchFrame
+          } catch {
+            garbage.push(raw.toString())
+            return
+          }
           if (frame.t !== 'batch') return
           batches.push(frame)
           if (opts.onBatch) opts.onBatch(frame, conn)
@@ -81,7 +111,13 @@ export async function createStubGateway(opts: StubGatewayOptions = {}): Promise<
       wss = undefined
       if (!s) return resolve()
       for (const c of s.clients) c.terminate()
-      s.close(() => resolve())
+      for (const sock of open) sock.destroy() // connections still mid-handshake
+      s.close()
+      // WebSocketServer.close leaves an externally supplied http server running.
+      const h = httpServer
+      httpServer = undefined
+      if (h) h.close(() => resolve())
+      else resolve()
     })
 
   await listen()
@@ -90,8 +126,15 @@ export async function createStubGateway(opts: StubGatewayOptions = {}): Promise<
     batches,
     conns,
     rejectWith: (code) => { reject = code },
+    garbage,
     stop: halt,
-    start: async () => { if (!wss) await listen() },
-    close: halt,
+    start: async () => {
+      if (closed) throw new Error('stub gateway was closed; create a new one')
+      if (!wss) await listen()
+    },
+    close: async () => {
+      closed = true
+      await halt()
+    },
   }
 }

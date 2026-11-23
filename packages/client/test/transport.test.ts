@@ -1,3 +1,4 @@
+import { HELLO_DEFAULTS } from '@logguber/shared'
 import { createStubGateway, type StubGateway } from './helpers/stub-gateway'
 import { base, batch, sleep, waitFor } from './helpers/fixtures'
 import { buildTransport, createTransport, type Transport, type TransportHooks } from '../src/transport'
@@ -107,12 +108,16 @@ test('reports a non-retryable nack without reconnecting', async () => {
   expect(g.conns.length).toBe(1)
 })
 
-test('send is refused while connecting (no gateway yet)', async () => {
+test('send is refused while connecting and nothing is queued for later', async () => {
   const g = await gateway()
   await g.stop()
   const t = transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 5, maxMs: 10 } })
   expect(t.send(batch('1'))).toBe(false)
   expect(t.inFlight()).toBe(0)
+  await g.start()
+  await waitFor(() => t.state() === 'open')
+  await sleep(50)
+  expect(g.batches).toEqual([]) // the refused batch was never delivered
 })
 
 test('ignores acks for unknown or already-acked ids, malformed JSON and unknown frame types', async () => {
@@ -152,7 +157,7 @@ test('a drop with batches in flight releases their slots and nacks them as retry
   expect(t.send(batch('3'))).toBe(true)
 })
 
-test('one failed connect counts as one attempt: backoff grows once per failure and resets on success', async () => {
+test('one failed connect counts as one attempt: backoff grows once per failure and resets once stable', async () => {
   const g = await gateway()
   await g.stop()
   const delays: number[] = []
@@ -164,14 +169,141 @@ test('one failed connect counts as one attempt: backoff grows once per failure a
   }, {
     random: () => 1, // full jitter at its ceiling makes the delay observable
     onBackoff: (ms) => delays.push(ms),
+    stableMs: 30,
   })
   await waitFor(() => delays.length >= 3)
   expect(delays.slice(0, 3)).toEqual([10, 20, 40]) // error + close did not double count
   await g.start()
   await waitFor(() => t.state() === 'open', 3000)
+  await sleep(80) // stay open past the stability window
+  const before = delays.length
   await g.stop()
+  await waitFor(() => delays.length > before)
+  expect(delays[before]).toBe(10) // reset after a stable connection
+})
+
+test('a connection dropped right after hello does not reset the backoff', async () => {
+  const g = await gateway()
+  const delays: number[] = []
+  const t = transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 10, maxMs: 1000 } }, {
+    random: () => 1,
+    onBackoff: (ms) => delays.push(ms),
+    stableMs: 60_000,
+  })
+  for (let i = 1; i <= 3; i++) {
+    await waitFor(() => g.conns.length >= i && t.state() === 'open')
+    g.conns[i - 1].closeWith(1011)
+    await waitFor(() => delays.length >= i)
+  }
+  expect(delays).toEqual([10, 20, 40])
+})
+
+test('backoff delay is clamped at maxMs', async () => {
+  const g = await gateway()
+  await g.stop()
+  const delays: number[] = []
+  transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 10, maxMs: 25 } }, {
+    random: () => 1,
+    onBackoff: (ms) => delays.push(ms),
+  })
   await waitFor(() => delays.length >= 4)
-  expect(delays[delays.length - 1]).toBe(10) // reset after the successful open
+  expect(delays.slice(0, 4)).toEqual([10, 20, 25, 25])
+})
+
+test('a malformed URL does not throw and goes straight to fatal', async () => {
+  const onError = vi.fn()
+  let t!: Transport
+  expect(() => { t = transport({ ...base, ...handlers, onError, url: 'not a url' }) }).not.toThrow()
+  expect(t.state()).toBe('fatal')
+  expect(onError).toHaveBeenCalledTimes(1)
+  expect(t.send(batch('1'))).toBe(false)
+})
+
+test('a header-invalid API key is fatal and is not retried', async () => {
+  const g = await gateway()
+  const onError = vi.fn()
+  const t = transport({ ...base, ...handlers, onError, apiKey: 'bad\nkey', url: g.url, backoff: { baseMs: 5, maxMs: 5 } })
+  expect(t.state()).toBe('fatal')
+  await sleep(80)
+  expect(g.conns.length).toBe(0)
+  expect(onError).toHaveBeenCalledTimes(1)
+})
+
+test('an HTTP 401 or 403 refusal of the upgrade is fatal; other statuses stay transient', async () => {
+  for (const status of [401, 403]) {
+    const g = await gateway({ refuseUpgradeWith: status })
+    const t = transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 5, maxMs: 5 } })
+    await waitFor(() => t.state() === 'fatal')
+    await sleep(100)
+    expect(t.state()).toBe('fatal')
+  }
+  const g = await gateway({ refuseUpgradeWith: 503 })
+  const attempts = vi.fn()
+  const t = transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 5, maxMs: 5 } }, { onBackoff: attempts })
+  await waitFor(() => attempts.mock.calls.length >= 3)
+  expect(t.state()).not.toBe('fatal')
+})
+
+test('a gateway that upgrades but never sends hello is dropped and retried', async () => {
+  const g = await gateway({ withholdHello: true })
+  const onError = vi.fn()
+  const t = transport({ ...base, ...handlers, onError, url: g.url, backoff: { baseMs: 5, maxMs: 10 } }, { helloTimeoutMs: 40 })
+  await waitFor(() => g.conns.length >= 2, 2000) // a reconnect attempt, not a permanent connecting
+  expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('hello') }))
+  expect(t.send(batch('1'))).toBe(false)
+})
+
+test('hello fields are clamped to defaults when invalid', async () => {
+  const g = await gateway({ hello: { maxEntriesPerBatch: 0, maxBatchBytes: Number.NaN, ackWindow: -3 } })
+  const onHello = vi.fn()
+  const t = transport({ ...base, ...handlers, onHello, url: g.url })
+  await waitFor(() => t.state() === 'open')
+  expect(onHello).toHaveBeenCalledWith({ t: 'hello', ...HELLO_DEFAULTS })
+  expect(t.send(batch('1'))).toBe(true)
+})
+
+test('close() while connecting is quiet and does not report an error', async () => {
+  const g = await gateway({ withholdHello: true })
+  const onError = vi.fn()
+  const t = transport({ ...base, ...handlers, onError, url: g.url })
+  expect(t.state()).toBe('connecting')
+  await t.close()
+  await sleep(30)
+  expect(onError).not.toHaveBeenCalled()
+  expect(t.state()).toBe('closed')
+})
+
+test('an ack, a nack and close() each clear the ack timer and close() does not nack', async () => {
+  const g = await gateway({ onBatch: () => {} })
+  const onNack = vi.fn()
+  const onAck = vi.fn()
+  const t = transport({ ...base, ...handlers, onAck, onNack, url: g.url, ackTimeoutMs: 40 })
+  await waitFor(() => t.state() === 'open')
+  t.send(batch('a')); t.send(batch('n')); t.send(batch('c'))
+  g.conns[0].send({ t: 'ack', id: 'a' })
+  g.conns[0].send({ t: 'nack', id: 'n', reason: 'x', retryable: false })
+  await waitFor(() => t.inFlight() === 1)
+  await t.close()
+  await sleep(120) // well past ackTimeoutMs: a surviving timer would nack
+  expect(onAck.mock.calls).toEqual([['a']])
+  expect(onNack).toHaveBeenCalledTimes(1) // only the gateway's nack for 'n'
+  expect(onNack.mock.calls[0][0].id).toBe('n')
+  expect(t.inFlight()).toBe(0)
+})
+
+test('stub: close() is final and start() after it throws', async () => {
+  const g = await createStubGateway()
+  await g.close()
+  await expect(g.start()).rejects.toThrow()
+})
+
+test('stub: garbage from a client is tolerated', async () => {
+  const g = await gateway()
+  const ws = new (await import('ws')).WebSocket(g.url)
+  await new Promise((r) => ws.once('open', r))
+  ws.send('{nope')
+  await waitFor(() => g.garbage.length === 1)
+  ws.close()
 })
 
 test('fatal clears the reconnect timer and close() afterwards is safe', async () => {

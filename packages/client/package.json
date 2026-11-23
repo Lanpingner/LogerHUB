@@ -3,17 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@logguber/shared": "workspace:*",
-    "ws": "^8.23.0"
-  },
-  "devDependencies": {
-    "@types/ws": "^8.18.2"
-  }
+  "engines": { "node": ">=24" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": { "@logguber/shared": "workspace:*", "ws": "^8.23.0" },
+  "devDependencies": { "@types/ws": "^8.18.2" }
 }

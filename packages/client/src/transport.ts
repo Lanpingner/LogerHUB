@@ -31,6 +31,10 @@ export interface TransportHooks {
   random?: () => number
   /** Observes each scheduled reconnect delay. */
   onBackoff?: (delayMs: number) => void
+  /** Max wait for `hello` after the upgrade. Default 10000. */
+  helloTimeoutMs?: number
+  /** How long a connection must stay open before the backoff counter resets. Default 10000. */
+  stableMs?: number
 }
 
 export interface Transport {
@@ -48,6 +52,14 @@ const FATAL_CODES = new Set([4401, 4403])
 const DEFAULT_ACK_TIMEOUT_MS = 30_000
 const DEFAULT_BACKOFF = { baseMs: 500, maxMs: 30_000 }
 const HANDSHAKE_TIMEOUT_MS = 10_000
+const DEFAULT_HELLO_TIMEOUT_MS = 10_000
+const DEFAULT_STABLE_MS = 10_000
+const AUTH_HTTP_STATUSES = new Set([401, 403])
+
+/** Finite number >= 1 (floored), otherwise the fallback. */
+function sane(n: unknown, fallback: number): number {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback
+}
 
 export function createTransport(opts: TransportOptions): Transport {
   return buildTransport(opts, {})
@@ -57,6 +69,8 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
   const ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
   const backoff = opts.backoff ?? DEFAULT_BACKOFF
   const random = hooks.random ?? Math.random
+  const helloTimeoutMs = hooks.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS
+  const stableMs = hooks.stableMs ?? DEFAULT_STABLE_MS
 
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; batch: BatchFrame }>()
   let state: TransportState = 'connecting'
@@ -66,6 +80,8 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let finished = false // close() called or fatal reached: never connect again
   let closing: Promise<void> | undefined
+  let helloTimer: ReturnType<typeof setTimeout> | undefined
+  let stableTimer: ReturnType<typeof setTimeout> | undefined
 
   // Nothing here may throw into the application, including its own callbacks.
   function guard(fn: () => void): void {
@@ -92,36 +108,70 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
     reconnectTimer = undefined
   }
 
+  function clearConnTimers(): void {
+    if (helloTimer !== undefined) clearTimeout(helloTimer)
+    if (stableTimer !== undefined) clearTimeout(stableTimer)
+    helloTimer = stableTimer = undefined
+  }
+
+  /** A condition no retry can fix: stop for good and say so. */
+  function fatal(e: Error): void {
+    finished = true
+    clearReconnect()
+    clearConnTimers()
+    setState('fatal')
+    report(e)
+  }
+
   function connect(): void {
     if (finished) return
     setState('connecting')
-    const u = new URL(opts.url)
-    u.searchParams.set('service', opts.service)
-    u.searchParams.set('env', opts.env)
     let sock: WebSocket
     try {
+      // A malformed URL or a header-invalid key throws here and can never succeed later.
+      const u = new URL(opts.url)
+      u.searchParams.set('service', opts.service)
+      u.searchParams.set('env', opts.env)
       sock = new WebSocket(u, {
         headers: { authorization: `Bearer ${opts.apiKey}` },
         handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
       })
     } catch (e) {
-      report(e)
-      scheduleReconnect()
+      fatal(new Error(`invalid transport configuration: ${e instanceof Error ? e.message : String(e)}`))
       return
     }
     ws = sock
     let dropped = false // an error and a close for the same socket count once
+    let refusedStatus: number | undefined // HTTP status when the upgrade itself was refused
+
+    helloTimer = setTimeout(() => {
+      helloTimer = undefined
+      report(new Error('gateway did not send hello in time'))
+      sock.terminate() // the close event routes through the normal transient path
+    }, helloTimeoutMs)
+    helloTimer.unref()
+
+    sock.on('unexpected-response', (_req, res) => {
+      refusedStatus = res.statusCode
+      res.resume()
+      report(new Error(`gateway refused the upgrade with HTTP ${res.statusCode}`))
+      sock.terminate()
+    })
 
     sock.on('message', (raw) => {
       if (ws === sock) onMessage(raw.toString())
     })
-    sock.on('error', (e) => report(e)) // the close event that follows drives reconnection
+    sock.on('error', (e) => {
+      // The close event that follows drives reconnection. Teardown noise is not an error.
+      if (!finished && refusedStatus === undefined) report(e)
+    })
     sock.on('close', (code) => {
       if (dropped) return
       dropped = true
       if (ws !== sock) return
       ws = undefined
-      onDrop(code)
+      clearConnTimers()
+      onDrop(code, refusedStatus !== undefined && AUTH_HTTP_STATUSES.has(refusedStatus))
     })
   }
 
@@ -135,10 +185,23 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
     }
     switch (frame?.t) {
       case 'hello':
-        if (Number.isInteger(frame.ackWindow) && frame.ackWindow >= 1) ackWindow = frame.ackWindow
-        attempt = 0
-        guard(() => opts.onHello?.(frame))
-        setState('open')
+        {
+          const hello: HelloFrame = {
+            t: 'hello',
+            maxEntriesPerBatch: sane(frame.maxEntriesPerBatch, HELLO_DEFAULTS.maxEntriesPerBatch),
+            maxBatchBytes: sane(frame.maxBatchBytes, HELLO_DEFAULTS.maxBatchBytes),
+            ackWindow: sane(frame.ackWindow, HELLO_DEFAULTS.ackWindow),
+          }
+          ackWindow = hello.ackWindow
+          if (helloTimer !== undefined) clearTimeout(helloTimer)
+          helloTimer = undefined
+          // Only a connection that stays up earns a fresh backoff; a flapping gateway keeps growing it.
+          if (stableTimer !== undefined) clearTimeout(stableTimer)
+          stableTimer = setTimeout(() => { stableTimer = undefined; attempt = 0 }, stableMs)
+          stableTimer.unref()
+          guard(() => opts.onHello?.(hello))
+          setState('open')
+        }
         break
       case 'ack':
         if (release(frame.id)) guard(() => opts.onAck(frame.id))
@@ -159,14 +222,15 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
     return true
   }
 
-  function onDrop(code: number): void {
+  function onDrop(code: number, authRefused: boolean): void {
     releaseAll('connection closed')
     if (finished) return
+    if (authRefused) {
+      fatal(new Error('gateway refused the upgrade as unauthorized: check the API key and its permissions'))
+      return
+    }
     if (FATAL_CODES.has(code)) {
-      finished = true
-      clearReconnect()
-      setState('fatal')
-      report(new Error(`gateway closed the connection with ${code}: check the API key and its permissions`))
+      fatal(new Error(`gateway closed the connection with ${code}: check the API key and its permissions`))
       return
     }
     setState('closed')
@@ -213,6 +277,7 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
       if (closing) return closing
       finished = true
       clearReconnect()
+      clearConnTimers()
       for (const p of pending.values()) clearTimeout(p.timer)
       pending.clear()
       const sock = ws
