@@ -15,6 +15,8 @@ export interface SpoolOptions {
   busyTimeoutMs?: number
   /** Pushes between full re-counts of stored bytes (also done on every prune()). Default 1000. */
   reseedEvery?: number
+  /** Synchronous pause between open retries (ms); replaceable so tests need not wait. */
+  sleep?: (ms: number) => void
   onError?: (e: Error) => void
 }
 
@@ -40,6 +42,7 @@ const DB_FILE = 'spool.db'
 const CORRUPT_CODES = new Set([11, 26])
 const DEFAULT_BUSY_TIMEOUT_MS = 250
 const DEFAULT_RESEED_EVERY = 1000
+const OPEN_RETRY_DELAYS_MS = [50, 100]
 const SCHEMA_ERROR = /no such column|no such table|has no column named/i
 
 const toError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
@@ -122,6 +125,27 @@ function connect(file: string, busyTimeoutMs: number): Handle {
   }
 }
 
+const isTransientBusy = (e: unknown): boolean => {
+  const code = (e as { errcode?: number }).errcode
+  return typeof code === 'number' && ((code & 0xff) === 5 || (code & 0xff) === 6)
+}
+
+function blockingSleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Several workers starting together contend on the file; losing that race must not disable the spool. */
+function connectWithRetry(file: string, busyMs: number, sleep: (ms: number) => void): Handle {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return connect(file, busyMs)
+    } catch (e) {
+      if (!isTransientBusy(e) || attempt >= OPEN_RETRY_DELAYS_MS.length) throw e
+      sleep(OPEN_RETRY_DELAYS_MS[attempt])
+    }
+  }
+}
+
 function removeDbFiles(file: string): void {
   for (const suffix of ['', '-wal', '-shm']) fs.rmSync(file + suffix, { force: true })
 }
@@ -135,18 +159,19 @@ export function createSpool(opts: SpoolOptions): Spool {
   const report = (e: unknown): void => {
     try { opts.onError?.(toError(e)) } catch { /* a throwing handler must not crash the host */ }
   }
+  const sleep = opts.sleep ?? blockingSleep
   const file = path.join(opts.dir, DB_FILE)
 
   let h: Handle
   try {
     fs.mkdirSync(opts.dir, { recursive: true })
     try {
-      h = connect(file, busyMs)
+      h = connectWithRetry(file, busyMs, sleep)
     } catch (e) {
       if (!isRecoverable(e)) throw e
       report(e)
       removeDbFiles(file)
-      h = connect(file, busyMs)
+      h = connectWithRetry(file, busyMs, sleep)
     }
   } catch (e) {
     report(e)
@@ -155,15 +180,18 @@ export function createSpool(opts: SpoolOptions): Spool {
 
   let open = true
   let unhealthy = false
+  let dbClosed = false
   let pruned = 0
   let sinceReseed = 0
 
   /** Reopens over a fresh file after mid-life corruption. Rows in the damaged file are lost. */
   function recover(): boolean {
     try { h.db.close() } catch { /* already unusable */ }
+    dbClosed = true
     try {
       removeDbFiles(file)
-      h = connect(file, busyMs)
+      h = connectWithRetry(file, busyMs, sleep)
+      dbClosed = false
       return true
     } catch (e) {
       report(e)
@@ -308,6 +336,7 @@ export function createSpool(opts: SpoolOptions): Spool {
     close() {
       if (!open) return
       open = false
+      if (dbClosed) return // a failed recovery already closed it
       try { h.db.close() } catch (e) { report(e) }
     },
   }

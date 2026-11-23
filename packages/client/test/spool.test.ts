@@ -359,6 +359,57 @@ describe('hardening', () => {
     expect(total).toBeLessThanOrEqual(6600) // without re-seeding this reaches ~7100
   })
 
+  // A sibling holding an exclusive lock on a fresh file makes our open fail with SQLITE_BUSY.
+  function lockedFile() {
+    const dir = tmp()
+    const raw = new DatabaseSync(path.join(dir, 'spool.db'))
+    raw.exec('CREATE TABLE other (v TEXT)')
+    raw.exec('BEGIN EXCLUSIVE')
+    return { dir, raw }
+  }
+
+  test('a transient SQLITE_BUSY at open is retried and the spool comes up without reporting', () => {
+    const { dir, raw } = lockedFile()
+    const onError = vi.fn()
+    const sleep = vi.fn(() => { raw.exec('COMMIT'); raw.close() }) // the sibling finishes during the backoff
+    const s = createSpool({ dir, busyTimeoutMs: 5, onError, sleep })
+    expect(sleep).toHaveBeenCalledWith(50)
+    expect(s.available()).toBe(true)
+    expect(onError).not.toHaveBeenCalled()
+    s.push(batch('01A'))
+    expect(s.count()).toBe(1)
+  })
+
+  test('a persistent SQLITE_BUSY ends in the no-op spool after bounded attempts', () => {
+    const { dir, raw } = lockedFile()
+    const onError = vi.fn()
+    const sleep = vi.fn()
+    const s = createSpool({ dir, busyTimeoutMs: 5, onError, sleep })
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([50, 100])
+    expect(s.available()).toBe(false)
+    expect(onError).toHaveBeenCalledTimes(1)
+    raw.exec('ROLLBACK'); raw.close()
+  })
+
+  test.skipIf(process.getuid?.() === 0)('close() after a failed recovery does not double-close or report', () => {
+    const dir = tmp(); const onError = vi.fn()
+    const s = createSpool({ dir, onError })
+    for (let i = 0; i < 30; i++) s.push(batch(`a${i}`, 'x'.repeat(500)))
+    const f = path.join(dir, 'spool.db')
+    const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
+    const size = fs.statSync(f).size
+    const fd = fs.openSync(f, 'r+'); fs.writeSync(fd, Buffer.alloc(size - 4096, 0x5a), 0, size - 4096, 4096); fs.closeSync(fd)
+    fs.chmodSync(dir, 0o500)
+    try {
+      s.count()
+      const before = onError.mock.calls.length
+      s.close()
+      expect(onError.mock.calls.length).toBe(before)
+    } finally {
+      fs.chmodSync(dir, 0o700)
+    }
+  })
+
   function corruptPages(dir: string) {
     const f = path.join(dir, 'spool.db')
     const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
