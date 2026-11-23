@@ -13,6 +13,8 @@ export interface SpoolOptions {
   staleClaimMs?: number
   /** How long a locked database may block the caller (ms). Default 250: a logger must not stall requests. */
   busyTimeoutMs?: number
+  /** Pushes between full re-counts of stored bytes (also done on every prune()). Default 1000. */
+  reseedEvery?: number
   onError?: (e: Error) => void
 }
 
@@ -37,6 +39,8 @@ const DB_FILE = 'spool.db'
 // (e.g. SQLITE_CORRUPT_INDEX = 779) match too.
 const CORRUPT_CODES = new Set([11, 26])
 const DEFAULT_BUSY_TIMEOUT_MS = 250
+const DEFAULT_RESEED_EVERY = 1000
+const SCHEMA_ERROR = /no such column|no such table|has no column named/i
 
 const toError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
 
@@ -108,9 +112,10 @@ function connect(file: string, busyTimeoutMs: number): Handle {
     return { db, st, bytes: Number((st.total.get() as { n: number }).n) }
   } catch (e) {
     try { db.close() } catch { /* already unusable */ }
-    // Plain SQLITE_ERROR here ("no such column") means a `spool` table of another shape
-    // already exists (older client, foreign file); callers start over on it.
-    if (e instanceof Error && ((e as { errcode?: number }).errcode ?? 0) % 256 === 1) {
+    // Only a message that names a missing column/table says the existing `spool` table has
+    // another shape (older client, foreign file). Any other SQLITE_ERROR is unidentified, and
+    // must not cost the user a file that may hold undelivered logs.
+    if (e instanceof Error && ((e as { errcode?: number }).errcode ?? 0) % 256 === 1 && SCHEMA_ERROR.test(e.message)) {
       Object.assign(e, { schemaMismatch: true })
     }
     throw e
@@ -126,6 +131,7 @@ export function createSpool(opts: SpoolOptions): Spool {
   const maxAge = opts.maxAge ?? DEFAULT_MAX_AGE
   const staleClaimMs = opts.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS
   const busyMs = opts.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS
+  const reseedEvery = Math.max(1, opts.reseedEvery ?? DEFAULT_RESEED_EVERY)
   const report = (e: unknown): void => {
     try { opts.onError?.(toError(e)) } catch { /* a throwing handler must not crash the host */ }
   }
@@ -150,6 +156,7 @@ export function createSpool(opts: SpoolOptions): Spool {
   let open = true
   let unhealthy = false
   let pruned = 0
+  let sinceReseed = 0
 
   /** Reopens over a fresh file after mid-life corruption. Rows in the damaged file are lost. */
   function recover(): boolean {
@@ -198,8 +205,14 @@ export function createSpool(opts: SpoolOptions): Spool {
   }
 
   /** Age and size pruning. Counters move only after the transaction commits. */
-  function pruneNow(cur: Handle, keepId?: string): number {
+  function pruneNow(cur: Handle, keepId?: string, forceReseed = false): number {
     const { st } = cur
+    // The running total only sees this process's writes. Re-counting from the database
+    // periodically folds in every sibling worker's rows, so the bound holds across workers.
+    if (forceReseed || ++sinceReseed >= reseedEvery) {
+      cur.bytes = Number((st.total.get() as { n: number }).n)
+      sinceReseed = 0
+    }
     const r = inTransaction(cur.db, () => {
       const old = st.delOlder.all(Date.now() - maxAge) as Array<{ size: number }>
       let removed = old.length
@@ -284,7 +297,7 @@ export function createSpool(opts: SpoolOptions): Spool {
       guard(undefined, (cur) => void cur.st.unclaim.run(id))
     },
 
-    prune: () => guard(0, (cur) => pruneNow(cur)),
+    prune: () => guard(0, (cur) => pruneNow(cur, undefined, true)),
 
     count: () => guard(0, (cur) => Number((cur.st.countAll.get() as { n: number }).n)),
 

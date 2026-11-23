@@ -317,6 +317,48 @@ describe('hardening', () => {
     db.close()
   })
 
+  test('a non-schema SQLITE_ERROR at open leaves the file untouched and the spool unavailable', () => {
+    const dir = tmp(); const f = path.join(dir, 'spool.db')
+    const foreign = new DatabaseSync(f)
+    foreign.exec('CREATE TABLE precious (v TEXT); INSERT INTO precious VALUES (\'keep\')')
+    foreign.exec('CREATE VIEW spool AS SELECT v AS id FROM precious') // index creation fails: "views may not be indexed"
+    foreign.close()
+    const onError = vi.fn()
+    const s = createSpool({ dir, onError })
+    expect(s.available()).toBe(false)
+    expect(onError).toHaveBeenCalled()
+    const check = new DatabaseSync(f)
+    expect(check.prepare('SELECT v FROM precious').get()).toMatchObject({ v: 'keep' })
+    check.close()
+  })
+
+  test('two workers on one directory: a re-seed counts both and pruning restores the combined bound', () => {
+    const dir = tmp()
+    const opts = { dir, maxBytes: 3000, reseedEvery: 1_000_000 }
+    const a = createSpool(opts); const b = createSpool(opts)
+    // Each sees only its own writes, so neither prunes on push.
+    for (let i = 0; i < 6; i++) { a.push(batch(`a${i}`, 'x'.repeat(200))); b.push(batch(`b${i}`, 'x'.repeat(200))) }
+    expect(a.prunedCount() + b.prunedCount()).toBe(0)
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    const total = () => Number((db.prepare('SELECT SUM(length(body)) AS n FROM spool').get() as { n: number }).n)
+    expect(total()).toBeGreaterThan(3000)
+    a.prune() // re-seeds from the database: sees both workers' rows
+    expect(total()).toBeLessThanOrEqual(3000)
+    expect(a.prunedCount()).toBeGreaterThan(0)
+    db.close()
+  })
+
+  test('push re-seeds from the database every reseedEvery pushes', () => {
+    const dir = tmp()
+    const opts = { dir, maxBytes: 6000, reseedEvery: 4 }
+    const a = createSpool(opts); const b = createSpool(opts)
+    for (let i = 0; i < 12; i++) { a.push(batch(`a${i}`, 'x'.repeat(200))); b.push(batch(`b${i}`, 'x'.repeat(200))) }
+    const db = new DatabaseSync(path.join(dir, 'spool.db'))
+    const total = Number((db.prepare('SELECT SUM(length(body)) AS n FROM spool').get() as { n: number }).n)
+    db.close()
+    expect(total).toBeLessThanOrEqual(6600) // without re-seeding this reaches ~7100
+  })
+
   function corruptPages(dir: string) {
     const f = path.join(dir, 'spool.db')
     const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
