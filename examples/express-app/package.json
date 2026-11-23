@@ -1,0 +1,11 @@
+{
+  "name": "logguber-example-express-app",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@logguber/client": "file:../../packages/client",
+    "express": "^5.3.0"
+  }
+}

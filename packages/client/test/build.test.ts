@@ -1,0 +1,42 @@
+import { execSync } from 'node:child_process'
+import fs from 'node:fs'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+
+const require = createRequire(import.meta.url)
+const dist = (f: string): string => path.resolve('packages/client/dist', f)
+
+describe('built package', () => {
+  beforeAll(() => {
+    fs.rmSync(path.resolve('packages/client/dist'), { recursive: true, force: true })
+    execSync('pnpm --filter @logguber/client build', { stdio: 'inherit' })
+  }, 120_000)
+
+  test('is importable both ways and exposes createLogger', async () => {
+    expect(fs.existsSync(dist('index.d.ts'))).toBe(true)
+    const cjs = require(dist('index.js'))
+    const esm = await import(dist('index.mjs'))
+    expect(typeof cjs.createLogger).toBe('function')
+    expect(typeof esm.createLogger).toBe('function')
+  })
+
+  test('exports only the public runtime surface', async () => {
+    const cjs = require(dist('index.js'))
+    const esm = await import(dist('index.mjs'))
+    expect(Object.keys(cjs).sort()).toEqual(['createLogger', 'createSink'])
+    expect(Object.keys(esm).sort()).toEqual(['createLogger', 'createSink'])
+  })
+
+  test('bundles shared, keeps ws and node:sqlite external, and ships declarations for both conditions', () => {
+    for (const f of ['index.js', 'index.mjs']) {
+      const src = fs.readFileSync(dist(f), 'utf8')
+      expect(src).not.toContain('@logguber/shared')
+      expect(src).toMatch(/node:sqlite/)
+      expect(src).toMatch(/["']ws["']/)
+    }
+    const pkg = JSON.parse(fs.readFileSync('packages/client/package.json', 'utf8'))
+    expect(Object.keys(pkg.dependencies)).toEqual(['ws'])
+    expect(fs.existsSync(dist('index.d.mts'))).toBe(true)
+    expect(fs.readFileSync(dist('index.d.ts'), 'utf8').replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')).not.toContain('@logguber/shared')
+  })
+})

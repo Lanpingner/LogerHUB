@@ -14,5 +14,4 @@ export type {
   Sink,
   SpoolConfig,
 } from './types'
-export { HELLO_DEFAULTS, LEVELS, LOKI_LIMITS } from '@logguber/shared'
 export type { Level, LogEntry } from '@logguber/shared'
