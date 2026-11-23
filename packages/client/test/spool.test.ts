@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createSpool } from '../src/spool'
+import { buildSpool, createSpool } from '../src/spool'
 import { batch, entry, tmp } from './helpers/fixtures'
 
 test('round-trips a batch and deletes it only on ack', () => {
@@ -372,7 +372,7 @@ describe('hardening', () => {
     const { dir, raw } = lockedFile()
     const onError = vi.fn()
     const sleep = vi.fn(() => { raw.exec('COMMIT'); raw.close() }) // the sibling finishes during the backoff
-    const s = createSpool({ dir, busyTimeoutMs: 5, onError, sleep })
+    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, sleep)
     expect(sleep).toHaveBeenCalledWith(50)
     expect(s.available()).toBe(true)
     expect(onError).not.toHaveBeenCalled()
@@ -384,7 +384,7 @@ describe('hardening', () => {
     const { dir, raw } = lockedFile()
     const onError = vi.fn()
     const sleep = vi.fn()
-    const s = createSpool({ dir, busyTimeoutMs: 5, onError, sleep })
+    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, sleep)
     expect(sleep.mock.calls.map((c) => c[0])).toEqual([50, 100])
     expect(s.available()).toBe(false)
     expect(onError).toHaveBeenCalledTimes(1)
@@ -402,12 +402,26 @@ describe('hardening', () => {
     fs.chmodSync(dir, 0o500)
     try {
       s.count()
+      expect(s.available()).toBe(false) // precondition: recovery really failed
       const before = onError.mock.calls.length
       s.close()
       expect(onError.mock.calls.length).toBe(before)
     } finally {
       fs.chmodSync(dir, 0o700)
     }
+  })
+
+  test('mid-life recovery from a public method never sleeps (no backoff on the request path)', () => {
+    const dir = tmp(); const sleep = vi.fn()
+    const s = buildSpool({ dir, onError: () => {} }, sleep)
+    for (let i = 0; i < 30; i++) s.push(batch(`a${i}`, 'x'.repeat(500)))
+    const f = path.join(dir, 'spool.db')
+    const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
+    const size = fs.statSync(f).size
+    const fd = fs.openSync(f, 'r+'); fs.writeSync(fd, Buffer.alloc(size - 4096, 0x5a), 0, size - 4096, 4096); fs.closeSync(fd)
+    s.count()
+    expect(s.available()).toBe(true) // recovered...
+    expect(sleep).not.toHaveBeenCalled() // ...without a backoff
   })
 
   function corruptPages(dir: string) {

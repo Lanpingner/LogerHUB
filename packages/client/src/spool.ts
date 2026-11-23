@@ -15,8 +15,6 @@ export interface SpoolOptions {
   busyTimeoutMs?: number
   /** Pushes between full re-counts of stored bytes (also done on every prune()). Default 1000. */
   reseedEvery?: number
-  /** Synchronous pause between open retries (ms); replaceable so tests need not wait. */
-  sleep?: (ms: number) => void
   onError?: (e: Error) => void
 }
 
@@ -134,7 +132,7 @@ function blockingSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** Several workers starting together contend on the file; losing that race must not disable the spool. */
+/** Process start only; never call from a request path. Several workers starting together contend on the file; losing that race must not disable the spool. */
 function connectWithRetry(file: string, busyMs: number, sleep: (ms: number) => void): Handle {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -151,6 +149,11 @@ function removeDbFiles(file: string): void {
 }
 
 export function createSpool(opts: SpoolOptions): Spool {
+  return buildSpool(opts, blockingSleep)
+}
+
+/** Test seam: `sleep` is the synchronous pause between open retries. Not part of the public surface. */
+export function buildSpool(opts: SpoolOptions, sleep: (ms: number) => void): Spool {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const maxAge = opts.maxAge ?? DEFAULT_MAX_AGE
   const staleClaimMs = opts.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS
@@ -159,7 +162,6 @@ export function createSpool(opts: SpoolOptions): Spool {
   const report = (e: unknown): void => {
     try { opts.onError?.(toError(e)) } catch { /* a throwing handler must not crash the host */ }
   }
-  const sleep = opts.sleep ?? blockingSleep
   const file = path.join(opts.dir, DB_FILE)
 
   let h: Handle
@@ -190,7 +192,8 @@ export function createSpool(opts: SpoolOptions): Spool {
     dbClosed = true
     try {
       removeDbFiles(file)
-      h = connectWithRetry(file, busyMs, sleep)
+      // One attempt, no backoff: this runs on the caller's request path.
+      h = connect(file, busyMs)
       dbClosed = false
       return true
     } catch (e) {
