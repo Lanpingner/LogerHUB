@@ -11,16 +11,17 @@ execFileSync('tsc', ['-p', 'tsconfig.build.json', '--outDir', tmp], { stdio: 'in
 
 const types = fs.readFileSync(`${tmp}/types.d.ts`, 'utf8').replace(/^import type \{ LogEntry \} from '@logguber\/shared';\n/m, '')
 const wire = fs.readFileSync(`${tmp}/../../../shared/src/protocol.ts`, 'utf8')
-const level = wire.match(/^export type Level = .*$/m)?.[0]
+const levels = wire.match(/^export const LEVELS = \[(.*?)\] as const$/m)?.[1]
+const level = levels && `export type Level = ${levels.split(',').map((l) => l.trim()).join(' | ')}`
 const entry = wire.match(/^export interface LogEntry \{[\s\S]*?^\}$/m)?.[0]
-if (!level || !entry) throw new Error('could not find Level/LogEntry in shared/src/protocol.ts')
+if (!level || !entry) throw new Error('could not find LEVELS/LogEntry in shared/src/protocol.ts')
 const fn = (name) => fs.readFileSync(`${tmp}/${name}.d.ts`, 'utf8').match(new RegExp(`^export declare function ${name === 'logger' ? 'createLogger' : 'createSink'}\\(.*$`, 'm'))[0]
 
 const out = [
   types.trimEnd(),
   '',
   '// Wire types, copied from @logguber/shared (which is bundled into the JavaScript).',
-  `${level.replace('= (typeof LEVELS)[number]', "= 'debug' | 'info' | 'warn' | 'error' | 'fatal'")}`,
+  level,
   entry,
   '',
   fn('logger'),
