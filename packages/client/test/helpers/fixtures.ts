@@ -24,3 +24,22 @@ export function tmp(): string {
 afterAll(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
+
+/** Shared transport/client options; spread into each test's options. */
+export const base = {
+  apiKey: 'lgb_test_secret',
+  service: 'public-api',
+  env: 'test',
+  onError: () => {},
+}
+
+export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/** Polls `fn` every 5ms until truthy; rejects after `timeoutMs` (default 2000). */
+export async function waitFor(fn: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!fn()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`)
+    await sleep(5)
+  }
+}
