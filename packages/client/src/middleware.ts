@@ -101,10 +101,16 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
         }
         if (!finished) http.aborted = true
         if (capturesBodies(mode, status, sampled)) {
-          const reqBody = requestBody(req, maxBytes, opts.allowFields)
-          if (reqBody !== undefined) (http.req as Record<string, unknown>).body = reqBody
-          const resBody = body?.result(opts.allowFields)
-          if (resBody !== undefined) (http.res as Record<string, unknown>).body = resBody
+          // Its own guard: a body that cannot be read costs the bodies, never the line the
+          // usage counts are derived from.
+          try {
+            const reqBody = requestBody(req, maxBytes, opts.allowFields)
+            if (reqBody !== undefined) (http.req as Record<string, unknown>).body = reqBody
+            const resBody = body?.result(opts.allowFields)
+            if (resBody !== undefined) (http.res as Record<string, unknown>).body = resBody
+          } catch {
+            // headers and timing still go out
+          }
         }
         logger.log(levelFor(status), `${req.method} ${route} ${status}`, {
           kind: 'request',
@@ -146,6 +152,8 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
   const chunks: Buffer[] = []
   let size = 0
   let overflow = false
+  /** Every byte seen, including past the cap, so the truncation marker can say how big the body was. */
+  let total = 0
   let decision: 'capture' | 'skip' | undefined
   let ended = false
 
@@ -156,22 +164,26 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
   }
 
   const take = (chunk: unknown, encoding: unknown): void => {
-    if (ended || overflow || decision === 'skip') return
+    if (ended || decision === 'skip') return
     decision ??= wanted() ? 'capture' : 'skip'
     if (decision === 'skip') return
-    let buf: Buffer
-    if (typeof chunk === 'string') {
-      buf = Buffer.from(chunk, typeof encoding === 'string' && Buffer.isEncoding(encoding) ? encoding : 'utf8')
-    } else if (ArrayBuffer.isView(chunk)) {
-      buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
-    } else return
-    if (size + buf.length > maxBytes) {
+    const view = ArrayBuffer.isView(chunk) ? chunk : undefined
+    if (typeof chunk !== 'string' && view === undefined) return
+    const enc = typeof encoding === 'string' && Buffer.isEncoding(encoding) ? encoding : 'utf8'
+    // Measure before copying: a large payload over the budget is never duplicated.
+    const len = typeof chunk === 'string' ? Buffer.byteLength(chunk, enc) : view!.byteLength
+    total += len
+    if (overflow) return
+    if (size + len > maxBytes) {
       overflow = true
       chunks.length = 0
       return
     }
-    size += buf.length
-    chunks.push(buf)
+    size += len
+    // Copies: the application may reuse or pool the buffer it just wrote.
+    chunks.push(
+      typeof chunk === 'string' ? Buffer.from(chunk, enc) : Buffer.from(Buffer.from(view!.buffer, view!.byteOffset, len)),
+    )
   }
 
   const write = res.write
@@ -195,7 +207,7 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
 
   return {
     result(allowFields) {
-      if (overflow) return { _truncated: true }
+      if (overflow) return { _truncated: true, _bytes: total }
       if (decision !== 'capture' || chunks.length === 0) return undefined
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))

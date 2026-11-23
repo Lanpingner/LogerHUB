@@ -51,7 +51,9 @@ export interface LogOptions {
   meta?: Record<string, unknown>
   /**
    * Marks the entry as a request record. Set by the Express middleware; honoured by `log()`
-   * only, so the level methods never produce it.
+   * only, so the level methods never produce it. `log()` honours it from any caller by design
+   * (a pino/winston adapter needs it), so usage counts derived from `kind: 'request'` trust the
+   * application not to forge one.
    */
   kind?: 'request'
 }

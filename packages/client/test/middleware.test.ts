@@ -4,7 +4,9 @@ import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { createExpressMiddleware } from '../src/middleware'
 import type { Logger } from '../src/types'
-import { appWith, useExpress, waitFor } from './helpers/fixtures'
+import { Readable } from 'node:stream'
+import compression from 'compression'
+import { appWith, sleep, useExpress, waitFor } from './helpers/fixtures'
 
 describe.each([4, 5] as const)('express %i', (major) => {
 beforeAll(() => useExpress(major))
@@ -162,7 +164,7 @@ test('a response over maxBodyBytes is marked truncated and still delivered whole
   const { app, entries } = await appWith({ bodies: 'always', maxBodyBytes: 64 })
   const res = await request(app).get('/big').expect(200)
   expect(res.body.pad).toHaveLength(500)
-  expect((await entries())[0].meta.http.res.body).toEqual({ _truncated: true })
+  expect((await entries())[0].meta.http.res.body).toEqual({ _truncated: true, _bytes: 510 })
 })
 
 test('chunked writes are reassembled, and the cap applies mid-stream', async () => {
@@ -174,7 +176,8 @@ test('chunked writes are reassembled, and the cap applies mid-stream', async () 
   const capped = await appWith({ bodies: 'always', maxBodyBytes: 50 })
   const res2 = await request(capped.app).get('/chunked')
   expect(res2.body.a).toHaveLength(100)
-  expect((await capped.entries())[0].meta.http.res.body).toEqual({ _truncated: true })
+  // the same marker shape truncateJson uses, so one LogQL filter catches both
+  expect((await capped.entries())[0].meta.http.res.body).toEqual({ _truncated: true, _bytes: 108 })
 })
 
 test('calling res.end twice captures the first body only and logs one line', async () => {
@@ -245,7 +248,7 @@ test('a JSON-parseable body on an event-stream or multipart type is still not ca
 })
 
 test('a client that disconnects before the response still produces one line, flagged aborted', async () => {
-  const { app, entries } = await appWith({})
+  const { app, entries, state } = await appWith({})
   const server = createServer(app).listen(0, '127.0.0.1')
   await new Promise((r) => server.once('listening', r))
   try {
@@ -253,11 +256,13 @@ test('a client that disconnects before the response still produces one line, fla
     const req = httpRequest({ port, host: '127.0.0.1', path: '/hang' })
     req.on('error', () => {})
     req.end()
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => state.hangHits > 0) // the handler is running and will never answer
     req.destroy()
-    await waitFor(() => server.listenerCount('request') > 0)
-    await new Promise((r) => setTimeout(r, 50))
-    const e = await entries()
+    let e = await entries()
+    for (let i = 0; e.length === 0 && i < 100; i++) {
+      await sleep(20)
+      e = await entries()
+    }
     expect(e).toHaveLength(1)
     expect(e[0].meta.http).toMatchObject({ route: '/hang', status: 499, aborted: true })
     expect(e[0].level).toBe('warn')
@@ -311,6 +316,121 @@ test('a streamed, unparsed request body is never captured', async () => {
   const [e] = await entries()
   expect(e.meta.http.req.body ?? {}).toEqual({}) // `{}` on Express 4, see above
   expect(JSON.stringify(e)).not.toContain('hunter2')
+})
+
+test('log() honours kind from any caller, by design', async () => {
+  const { log, entries } = await appWith({})
+  log.log('info', 'x', { kind: 'request' })
+  const [e] = await entries()
+  expect(e.kind).toBe('request')
+})
+
+test('a req.body getter that throws costs the bodies, never the line', async () => {
+  const { app, entries } = await appWith({ bodies: 'always' })
+  app.get(
+    '/hostile',
+    (req, _res, next) => {
+      Object.defineProperty(req, 'body', {
+        get() {
+          throw new Error('nope')
+        },
+      })
+      next()
+    },
+    (_req, res) => void res.status(500).json({ error: 'x' }),
+  )
+  await request(app).get('/hostile').expect(500)
+  const e = await entries()
+  expect(e).toHaveLength(1)
+  expect(e[0].meta.http).toMatchObject({ route: '/hostile', status: 500 })
+  expect('body' in e[0].meta.http.req).toBe(false)
+})
+
+/** Raw response bytes, so a test can compare exactly what the client received. */
+const binary = (res: request.Response, cb: (err: Error | null, body: Buffer) => void): void => {
+  const parts: Buffer[] = []
+  res.on('data', (c: Buffer) => parts.push(c))
+  res.on('end', () => cb(null, Buffer.concat(parts)))
+}
+
+describe('response wrapping leaves the response intact', () => {
+  test('res.write with an explicit encoding (hex): bytes sent and body captured agree', async () => {
+    const { app, entries } = await appWith({ bodies: 'always' })
+    const json = Buffer.from('{"a":"\u00e9"}', 'utf8')
+    app.get('/hex', (_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      res.write(json.toString('hex'), 'hex')
+      res.end()
+    })
+    const res = await request(app).get('/hex').buffer(true).parse(binary)
+    expect(res.body).toEqual(json)
+    expect((await entries())[0].meta.http.res.body).toEqual({ a: '\u00e9' })
+  })
+
+  test('res.write with a callback argument still calls it', async () => {
+    const { app, entries } = await appWith({ bodies: 'always' })
+    let called = false
+    app.get('/cb', (_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      res.write('{"a":1}', () => {
+        called = true
+      })
+      res.end()
+    })
+    const res = await request(app).get('/cb')
+    expect(res.body).toEqual({ a: 1 })
+    expect(called).toBe(true)
+    expect((await entries())[0].meta.http.res.body).toEqual({ a: 1 })
+  })
+
+  test('write() backpressure (false) is passed through to the caller', async () => {
+    const { app } = await appWith({ bodies: 'always' })
+    let ret: boolean | undefined
+    app.get('/bp', (_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      ret = res.write('{"pad":"' + 'x'.repeat(1_000_000))
+      res.end('"}')
+    })
+    const res = await request(app).get('/bp')
+    expect(res.body.pad).toHaveLength(1_000_000)
+    expect(ret).toBe(false)
+  })
+
+  test('a piped response is delivered whole and its JSON body captured', async () => {
+    const { app, entries } = await appWith({ bodies: 'always' })
+    app.get('/piped', (_req, res) => {
+      res.setHeader('Content-Type', 'application/json')
+      Readable.from(['{"a":', '1,', '"b":2}']).pipe(res)
+    })
+    const res = await request(app).get('/piped')
+    expect(res.body).toEqual({ a: 1, b: 2 })
+    expect((await entries())[0].meta.http.res.body).toEqual({ a: 1, b: 2 })
+  })
+
+  test('behind compression: the client gets the right bytes and no body is captured', async () => {
+    const { app, entries } = await appWith({ bodies: 'always' })
+    const payload = { pad: 'z'.repeat(5000) }
+    app.get('/zip', compression({ threshold: 0 }), (_req, res) => void res.json(payload))
+    const res = await request(app).get('/zip').set('Accept-Encoding', 'gzip')
+    expect(res.headers['content-encoding']).toBe('gzip')
+    expect(res.body).toEqual(payload) // supertest inflated what the middleware let through
+    const [e] = await entries()
+    expect(e.meta.http.status).toBe(200)
+    expect('body' in e.meta.http.res).toBe(false)
+  })
+
+  test('a buffer the application reuses after writing does not alter the captured body', async () => {
+    const { app, entries } = await appWith({ bodies: 'always' })
+    app.get('/reuse', (_req, res) => {
+      const b = Buffer.from('{"a":"x"')
+      res.setHeader('Content-Type', 'application/json')
+      res.write(b)
+      b.fill('y')
+      res.end('}')
+    })
+    await request(app).get('/reuse').buffer(true).parse(binary)
+    expect((await entries())[0].meta.http.res.body).toEqual({ a: 'x' })
+  })
 })
 
 test('ordinary log calls never carry kind, even if one is smuggled in', async () => {

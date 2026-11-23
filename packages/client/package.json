@@ -3,21 +3,16 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@logguber/shared": "workspace:*",
-    "ws": "^8.23.0"
-  },
+  "engines": { "node": ">=24" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": { "@logguber/shared": "workspace:*", "ws": "^8.23.0" },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.6",
     "@types/express4": "npm:@types/express@^4.17.25",
     "@types/supertest": "^7.2.1",
     "@types/ws": "^8.18.2",
+    "compression": "^1.8.2",
     "express": "^5.3.0",
     "express4": "npm:express@^4.22.3",
     "supertest": "^7.3.2"

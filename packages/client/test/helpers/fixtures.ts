@@ -122,11 +122,12 @@ export async function appWith(
   const nested = express.Router()
   nested.get('/items/:sku', (_req, res) => void res.json({ ok: true }))
   app.use('/v1', nested)
-  app.get('/hang', () => {}) // never responds
+  const state = { hangHits: 0 }
+  app.get('/hang', () => void state.hangHits++) // never responds
 
   const entries = async (): Promise<Received[]> => {
     await log.flush()
     return gateway.batches.flatMap((b) => b.entries) as Received[]
   }
-  return { app, log, entries, gateway }
+  return { app, log, entries, gateway, state }
 }
