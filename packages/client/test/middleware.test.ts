@@ -272,6 +272,15 @@ test('a finished response is logged once, and the close that follows does not du
   expect(await entries()).toHaveLength(1)
 })
 
+test('an unparsed request emits no req.body key at all, on either Express major', async () => {
+  const { app, entries } = await appWith({ bodies: 'always' })
+  app.post('/noparse', (_req, res) => void res.status(500).end())
+  await request(app).post('/noparse').set('Content-Type', 'text/plain').send('hi')
+  const [e] = await entries()
+  expect('body' in e.meta.http.req).toBe(false)
+  expect('body' in e.meta.http.res).toBe(false)
+})
+
 test('a Buffer request body is never captured', async () => {
   const { app, entries } = await appWith({ bodies: 'always' })
   // What `express.raw()` leaves behind: a Buffer holding an unparsed JSON document.

@@ -32,11 +32,23 @@ function routeOf(req: RequestLike): string {
   return `${req.baseUrl ?? ''}${typeof p === 'string' ? p : String(p)}`
 }
 
+/**
+ * An empty object or array says nothing, and reads as "an empty body was sent". Express 4's
+ * json parser leaves `req.body = {}` for a request it did not parse where Express 5 leaves it
+ * undefined; dropping empties here is a deliberate normalisation of that upstream difference,
+ * so the same field exists, or not, on both. Do not "fix" it back.
+ */
+function nonEmpty(v: unknown): unknown {
+  if (Array.isArray(v)) return v.length > 0 ? v : undefined
+  if (v !== null && typeof v === 'object') return Object.keys(v).length > 0 ? v : undefined
+  return v
+}
+
 /** Only parsed objects and arrays: a Buffer, stream or free-form string cannot be redacted by key. */
 function requestBody(req: RequestLike, maxBytes: number, allowFields?: string[]): unknown {
   const b = req.body
   if (b === null || typeof b !== 'object' || Buffer.isBuffer(b) || ArrayBuffer.isView(b)) return undefined
-  return truncateJson(redactBody(b, { allowFields }), maxBytes)
+  return nonEmpty(truncateJson(redactBody(b, { allowFields }), maxBytes))
 }
 
 /**
@@ -187,7 +199,7 @@ function captureResponse(res: ServerResponse, mode: string, sampled: boolean, ma
       if (decision !== 'capture' || chunks.length === 0) return undefined
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        return truncateJson(redactBody(parsed, { allowFields }), maxBytes)
+        return nonEmpty(truncateJson(redactBody(parsed, { allowFields }), maxBytes))
       } catch {
         return undefined
       }
