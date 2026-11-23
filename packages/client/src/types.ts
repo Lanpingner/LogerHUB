@@ -1,4 +1,5 @@
 /** Client-facing option types only. Wire types live in `@logguber/shared`. */
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LogEntry } from '@logguber/shared'
 
 export interface RedactOptions {
@@ -48,7 +49,43 @@ export interface LoggerOptions {
 export interface LogOptions {
   dims?: Record<string, string>
   meta?: Record<string, unknown>
+  /**
+   * Marks the entry as a request record. Set by the Express middleware; honoured by `log()`
+   * only, so the level methods never produce it.
+   */
+  kind?: 'request'
 }
+
+/** The parts of an Express request the middleware reads, declared here so the package needs no Express types. */
+export interface RequestLike extends IncomingMessage {
+  path?: string
+  originalUrl?: string
+  baseUrl?: string
+  route?: { path?: unknown }
+  body?: unknown
+}
+
+export type BodyCapture = 'never' | 'on-error' | 'sample' | 'always'
+
+export interface MiddlewareOptions {
+  /** Dimensions for the entry, read when the response finishes (so `req.user` is populated). */
+  resolveDims?: (req: RequestLike) => Record<string, string | undefined>
+  /** Return true to skip a request entirely. Evaluated on entry. */
+  ignore?: (req: RequestLike) => boolean
+  /**
+   * `on-error` (default) captures bodies of responses with status >= 400; `sample` captures
+   * those plus `sampleRate` of the rest; `always` captures everything; `never` nothing.
+   */
+  bodies?: BodyCapture
+  /** Fraction (0..1) of successful requests captured under `sample`. Default 0. */
+  sampleRate?: number
+  /** Captured bodies larger than this are replaced by a truncation marker. Default 8192. */
+  maxBodyBytes?: number
+  /** When set, only these top-level body fields are captured. */
+  allowFields?: string[]
+}
+
+export type ExpressMiddleware = (req: RequestLike, res: ServerResponse, next: (err?: unknown) => void) => void
 
 export type LogMethod = (msg: string, opts?: LogOptions) => void
 
@@ -64,6 +101,8 @@ export interface Logger {
   child(opts?: { dims?: Record<string, string> }): Logger
   /** Cuts a batch and waits, briefly, for the gateway to acknowledge everything outstanding. */
   flush(): Promise<void>
+  /** One `kind: 'request'` entry per HTTP request. Mount with `app.use(log.expressMiddleware())`. */
+  expressMiddleware(opts?: MiddlewareOptions): ExpressMiddleware
   /** Final drain: undelivered batches are written to the spool for the next process. */
   close(): Promise<void>
 }

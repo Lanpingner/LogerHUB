@@ -1,7 +1,11 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import express from 'express'
 import type { BatchFrame, LogEntry } from '@logguber/shared'
+import { createLogger } from '../../src/logger'
+import type { Logger, LoggerOptions, MiddlewareOptions } from '../../src/types'
+import { createStubGateway } from './stub-gateway'
 
 export function entry(msg: string): LogEntry {
   return { ts: new Date().toISOString(), level: 'info', msg }
@@ -42,4 +46,75 @@ export async function waitFor(fn: () => boolean, timeoutMs = 2000): Promise<void
     if (Date.now() > deadline) throw new Error(`waitFor timed out after ${timeoutMs}ms`)
     await sleep(5)
   }
+}
+
+const teardown: Array<() => Promise<void>> = []
+
+afterEach(async () => {
+  for (const fn of teardown.splice(0)) await fn()
+})
+
+/** An entry as the gateway received it: `meta` is untyped JSON, so tests index into it freely. */
+export type Received = Omit<LogEntry, 'meta'> & { meta: any }
+
+/**
+ * A small Express app with the middleware installed, observed through the real path: a logger
+ * connected to a stub gateway, with entries read from the batches the gateway received.
+ * `entries()` flushes first, so call it after the requests have completed.
+ */
+export async function appWith(opts: MiddlewareOptions = {}, loggerOpts: Partial<LoggerOptions> = {}) {
+  const gateway = await createStubGateway()
+  const log: Logger = createLogger({ ...base, url: gateway.url, ...loggerOpts })
+  teardown.push(async () => {
+    await log.close()
+    await gateway.close()
+  })
+  await waitFor(() => gateway.conns.length > 0)
+
+  const app = express()
+  app.set('env', 'test') // keeps Express's default error handler from printing stack traces
+  app.use(log.expressMiddleware(opts))
+  app.use(express.json())
+  app.get('/users/:id', (_req, res) => void res.json({ id: 1, token: 'sekret' }))
+  app.get('/health', (_req, res) => void res.send('ok'))
+  app.get('/boom', (_req, res) => void res.status(500).json({ error: 'boom' }))
+  app.get('/throws', () => {
+    throw new Error('thrown')
+  })
+  app.post('/echo', (req, res) => void res.json(req.body))
+  app.post('/fail', (req, res) => void res.status(500).json({ error: 'nope', password: 'hunter2', echo: req.body }))
+  app.get('/big', (_req, res) => void res.json({ pad: 'x'.repeat(500) }))
+  app.get('/text', (_req, res) => void res.type('text/plain').send('plain words'))
+  app.get('/stream', (_req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.write('a')
+    res.write('b')
+    res.end('c')
+  })
+  app.get('/stream-json', (_req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.end('{"a":1}') // parseable as JSON, but a stream: must still not be captured
+  })
+  app.get('/chunked', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    res.write('{"a":')
+    res.write('"' + 'y'.repeat(100) + '"')
+    res.end('}')
+  })
+  app.get('/double-end', (_req, res) => {
+    res.on('error', () => {}) // Node reports the second end() as an error event; that is the app's bug, not ours
+    res.setHeader('Content-Type', 'application/json')
+    res.end('{"a":1}')
+    res.end('{"a":2}')
+  })
+  const nested = express.Router()
+  nested.get('/items/:sku', (_req, res) => void res.json({ ok: true }))
+  app.use('/v1', nested)
+  app.get('/hang', () => {}) // never responds
+
+  const entries = async (): Promise<Received[]> => {
+    await log.flush()
+    return gateway.batches.flatMap((b) => b.entries) as Received[]
+  }
+  return { app, log, entries, gateway }
 }

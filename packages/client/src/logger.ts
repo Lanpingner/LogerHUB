@@ -12,6 +12,7 @@ import { redactBody, truncateJson } from './redact'
 import { createSpool, type Spool } from './spool'
 import { createTransport, type Transport, type TransportState } from './transport'
 import { ulid } from './ulid'
+import { createExpressMiddleware } from './middleware'
 import type { Logger, LoggerOptions, LogOptions } from './types'
 
 const DEFAULT_MAX_ENTRIES = 100
@@ -520,25 +521,35 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
 }
 
 /** `owned` is false for a child: it shares the pipeline and must not be able to close it. */
-function wrap(core: LoggerCore, dims: Record<string, string>, owned: boolean): Logger {
+function wrap(
+  core: LoggerCore,
+  dims: Record<string, string>,
+  owned: boolean,
+  headerAllowlist: string[] | undefined,
+): Logger {
   // The call's own dimensions travel on the entry so that merging them — the one step that can
   // run a caller's getter — happens inside `accept`, where nothing escapes.
   const log = (level: string, msg: string, o?: LogOptions): void => {
-    core.accept({ level, msg, dims: o?.dims, meta: o?.meta }, dims)
+    core.accept({ level, msg, dims: o?.dims, meta: o?.meta, kind: o?.kind }, dims)
   }
-  return {
+  // `kind` is the middleware's to set: the level methods drop it, so an ordinary call never produces one.
+  const plain = (level: string, msg: string, o?: LogOptions): void =>
+    log(level, msg, o === undefined ? o : { dims: o.dims, meta: o.meta })
+  const self: Logger = {
     log,
-    debug: (msg, o) => log('debug', msg, o),
-    info: (msg, o) => log('info', msg, o),
-    warn: (msg, o) => log('warn', msg, o),
-    error: (msg, o) => log('error', msg, o),
-    fatal: (msg, o) => log('fatal', msg, o),
-    child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false),
+    debug: (msg, o) => plain('debug', msg, o),
+    info: (msg, o) => plain('info', msg, o),
+    warn: (msg, o) => plain('warn', msg, o),
+    error: (msg, o) => plain('error', msg, o),
+    fatal: (msg, o) => plain('fatal', msg, o),
+    child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false, headerAllowlist),
+    expressMiddleware: (o) => createExpressMiddleware(self, { ...o, headerAllowlist }),
     flush: () => core.flush(),
     close: owned ? () => core.close() : () => Promise.resolve(),
   }
+  return self
 }
 
 export function createLogger(opts: LoggerOptions): Logger {
-  return wrap(createCore(opts), {}, true)
+  return wrap(createCore(opts), {}, true, opts.headerAllowlist)
 }
