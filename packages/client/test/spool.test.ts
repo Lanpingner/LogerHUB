@@ -372,7 +372,7 @@ describe('hardening', () => {
     const { dir, raw } = lockedFile()
     const onError = vi.fn()
     const sleep = vi.fn(() => { raw.exec('COMMIT'); raw.close() }) // the sibling finishes during the backoff
-    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, sleep)
+    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, { sleep })
     expect(sleep).toHaveBeenCalledWith(50)
     expect(s.available()).toBe(true)
     expect(onError).not.toHaveBeenCalled()
@@ -384,7 +384,7 @@ describe('hardening', () => {
     const { dir, raw } = lockedFile()
     const onError = vi.fn()
     const sleep = vi.fn()
-    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, sleep)
+    const s = buildSpool({ dir, busyTimeoutMs: 5, onError }, { sleep })
     expect(sleep.mock.calls.map((c) => c[0])).toEqual([50, 100])
     expect(s.available()).toBe(false)
     expect(onError).toHaveBeenCalledTimes(1)
@@ -413,15 +413,49 @@ describe('hardening', () => {
 
   test('mid-life recovery from a public method never sleeps (no backoff on the request path)', () => {
     const dir = tmp(); const sleep = vi.fn()
-    const s = buildSpool({ dir, onError: () => {} }, sleep)
+    const onError = vi.fn()
+    const s = buildSpool({ dir, onError }, { sleep })
     for (let i = 0; i < 30; i++) s.push(batch(`a${i}`, 'x'.repeat(500)))
     const f = path.join(dir, 'spool.db')
     const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
     const size = fs.statSync(f).size
     const fd = fs.openSync(f, 'r+'); fs.writeSync(fd, Buffer.alloc(size - 4096, 0x5a), 0, size - 4096, 4096); fs.closeSync(fd)
     s.count()
+    expect(onError).toHaveBeenCalled() // precondition: corruption was really detected
     expect(s.available()).toBe(true) // recovered...
     expect(sleep).not.toHaveBeenCalled() // ...without a backoff
+  })
+
+  test.skipIf(process.getuid?.() === 0)('a failed recovery is retried once per cooldown window, not latched forever', () => {
+    vi.useFakeTimers()
+    const dir = tmp(); const onError = vi.fn()
+    const s = buildSpool({ dir, onError }, { recoveryCooldownMs: 5000 })
+    try {
+      for (let i = 0; i < 30; i++) s.push(batch(`a${i}`, 'x'.repeat(500)))
+      const f = path.join(dir, 'spool.db')
+      const w = new DatabaseSync(f); w.exec('PRAGMA wal_checkpoint(TRUNCATE)'); w.close()
+      const size = fs.statSync(f).size
+      const fd = fs.openSync(f, 'r+'); fs.writeSync(fd, Buffer.alloc(size - 4096, 0x5a), 0, size - 4096, 4096); fs.closeSync(fd)
+      fs.chmodSync(dir, 0o500) // obstruction: recovery cannot delete the damaged file
+      s.count()
+      expect(s.available()).toBe(false)
+      const afterFirst = onError.mock.calls.length
+      vi.advanceTimersByTime(1000)
+      s.count(); s.push(batch('x'))
+      expect(onError.mock.calls.length).toBe(afterFirst) // within the cooldown: no new attempt
+      vi.advanceTimersByTime(5000)
+      s.count()
+      expect(onError.mock.calls.length).toBe(afterFirst + 1) // after it: exactly one attempt, still failing
+      expect(s.available()).toBe(false)
+      fs.chmodSync(dir, 0o700) // obstruction removed
+      vi.advanceTimersByTime(6000)
+      s.push(batch('back'))
+      expect(s.available()).toBe(true)
+      expect(s.claim(1)[0].id).toBe('back')
+    } finally {
+      fs.chmodSync(dir, 0o700)
+      vi.useRealTimers()
+    }
   })
 
   function corruptPages(dir: string) {

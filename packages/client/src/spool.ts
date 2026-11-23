@@ -40,6 +40,7 @@ const DB_FILE = 'spool.db'
 const CORRUPT_CODES = new Set([11, 26])
 const DEFAULT_BUSY_TIMEOUT_MS = 250
 const DEFAULT_RESEED_EVERY = 1000
+const DEFAULT_RECOVERY_COOLDOWN_MS = 5000
 const OPEN_RETRY_DELAYS_MS = [50, 100]
 const SCHEMA_ERROR = /no such column|no such table|has no column named/i
 
@@ -149,11 +150,20 @@ function removeDbFiles(file: string): void {
 }
 
 export function createSpool(opts: SpoolOptions): Spool {
-  return buildSpool(opts, blockingSleep)
+  return buildSpool(opts, {})
 }
 
-/** Test seam: `sleep` is the synchronous pause between open retries. Not part of the public surface. */
-export function buildSpool(opts: SpoolOptions, sleep: (ms: number) => void): Spool {
+/** Internal knobs, kept off the public options. Not for the package index to re-export. */
+export interface SpoolHooks {
+  /** Synchronous pause between open retries (ms). */
+  sleep?: (ms: number) => void
+  /** After a failed mid-life recovery, wait this long (ms) before the next attempt. Default 5000. */
+  recoveryCooldownMs?: number
+}
+
+export function buildSpool(opts: SpoolOptions, hooks: SpoolHooks): Spool {
+  const sleep = hooks.sleep ?? blockingSleep
+  const recoveryCooldownMs = hooks.recoveryCooldownMs ?? DEFAULT_RECOVERY_COOLDOWN_MS
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const maxAge = opts.maxAge ?? DEFAULT_MAX_AGE
   const staleClaimMs = opts.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS
@@ -183,6 +193,7 @@ export function buildSpool(opts: SpoolOptions, sleep: (ms: number) => void): Spo
   let open = true
   let unhealthy = false
   let dbClosed = false
+  let unhealthySince = 0
   let pruned = 0
   let sinceReseed = 0
 
@@ -204,7 +215,16 @@ export function buildSpool(opts: SpoolOptions, sleep: (ms: number) => void): Spo
 
   /** Runs fn, converting any failure into an onError report and `fallback`. */
   function guard<T>(fallback: T, fn: (cur: Handle) => T): T {
-    if (!open || unhealthy) return fallback
+    if (!open) return fallback
+    if (unhealthy) {
+      // Cooldown, not a latch: one bounded attempt per window, so a transient lock costs a window.
+      if (Date.now() - unhealthySince < recoveryCooldownMs) return fallback
+      if (!recover()) {
+        unhealthySince = Date.now()
+        return fallback
+      }
+      unhealthy = false
+    }
     try {
       return fn(h)
     } catch (e) {
@@ -212,6 +232,7 @@ export function buildSpool(opts: SpoolOptions, sleep: (ms: number) => void): Spo
       if (!isCorrupt(e)) return fallback
       if (!recover()) {
         unhealthy = true
+        unhealthySince = Date.now()
         return fallback
       }
       try {
