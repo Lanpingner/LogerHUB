@@ -23,7 +23,7 @@
 - Spool bounds: `maxBytes` 256MB, `maxAge` 7 days. On overflow prune oldest, count pruned entries, report the count to the gateway on the next successful batch.
 - Body truncation cap: 8KB of serialised JSON per body, replaced with `{"_truncated": true, "_bytes": <n>}`. Truncation happens at a structural boundary so the result is still valid JSON.
 - Header capture is allowlist-only. Default allowlist: `host`, `user-agent`, `content-type`, `content-length`, `accept`, `referer`, `x-request-id`.
-- Default redacted body keys, case-insensitive, at any depth: `password`, `pass`, `token`, `secret`, `apikey`, `api_key`, `authorization`, `credential`, `card`, `cardnumber`, `cvv`, `ssn`, `otp`, `refresh_token`. Replacement value is the string `[redacted]`.
+- Default redacted body keys, at any depth. Keys are normalised by lowercasing and stripping non-alphanumerics, then matched (a) exactly against `password`, `pass`, `token`, `secret`, `apikey`, `api_key`, `authorization`, `credential`, `card`, `cardnumber`, `cvv`, `ssn`, `otp`, `refresh_token`, and (b) by substring against `password`, `secret`, `token`, `credential`, `apikey`, `privatekey` — never a bare `key`. Replacement value is the string `[redacted]`. A caller's `redactKeys` extends these defaults and never replaces them; narrowing is done with `allowFields`.
 - Body capture modes: `never`, `on-error` (default), `sample`, `always`.
 - Loki ceilings the client must respect: 128 structured-metadata entries, 64KB structured metadata per line, 256KB per line.
 - Entry levels: `debug`, `info`, `warn`, `error`, `fatal`. Unknown levels coerce to `info`.

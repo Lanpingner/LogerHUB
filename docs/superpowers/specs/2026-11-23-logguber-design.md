@@ -524,10 +524,21 @@ log.info()  ──>  in-memory queue  ──>  WebSocket  ──ack──>  done
 
 ### The SQLite spool
 
-- One database file per spool directory, opened in WAL mode with a busy timeout, so
-  several worker processes can share it safely. Rows are claimed inside a transaction so
+- One database file per spool directory, opened in WAL mode with a **250ms** busy timeout,
+  so several worker processes can share it safely. The timeout is deliberately short:
+  `node:sqlite` is synchronous, so a contended lock stalls the caller's request for the
+  whole timeout from inside `log.info()`. A logger that stalls a request for seconds is
+  worse than a logger that drops a batch, so a lock timeout surfaces as a counted,
+  reported drop instead. Rows are claimed inside a transaction so
   two workers never send the same batch — and if they somehow did, the gateway's dedupe
   would absorb it.
+- **Claims expire.** A worker killed mid-drain — a deploy, an OOM — would otherwise leave
+  its rows claimed and undelivered until the age bound pruned them days later, losing
+  precisely the logs the spool was holding for safekeeping. So each `claim()` first
+  releases rows claimed longer ago than `staleClaimMs` (default 60s) and counts the
+  attempt. The accepted consequence is that a batch genuinely in flight for longer than
+  that window can be sent twice; the gateway's batch-id dedupe absorbs it, and delivering
+  twice is strictly better than not delivering.
 - One table: `spool(id TEXT PRIMARY KEY, body BLOB, created_at INTEGER, attempts
   INTEGER)`. Bodies are the serialised batch, so draining needs no re-encoding.
 - **Only used while the server is unreachable**, as specified. While the stream is healthy
@@ -562,16 +573,44 @@ This is the part that matters most, because the logs will contain headers and bo
 and the next header someone invents to carry a token can never leak by omission. A
 denylist would be one forgotten entry away from shipping credentials.
 
-**Bodies are redacted by key, at any depth.** A default case-insensitive key list —
-`password`, `pass`, `token`, `secret`, `apikey`, `api_key`, `authorization`, `credential`,
-`card`, `cardnumber`, `cvv`, `ssn`, `otp`, `refresh_token` — is replaced with
-`"[redacted]"` in place, preserving the surrounding structure so the log still shows the
-shape of what happened. The list is extendable per service, and strict services can invert
-it to an allowlist (`bodyFields: ['orderId', 'status']`), capturing nothing else.
+Being on the allowlist is not enough on its own: `referer` has its query string and
+fragment stripped before capture, because OAuth callback URLs routinely carry
+`?token=` and `?code=` values that would otherwise land in a 90-day store. A referer that
+does not parse as a URL is dropped rather than guessed at.
+
+**Bodies are redacted by key, at any depth.** Each key is normalised — lowercased with
+non-alphanumeric characters stripped, so `access_token`, `accessToken`, and `Access-Token`
+are one key — then matched two ways: exactly against a default list (`password`, `pass`,
+`token`, `secret`, `apikey`, `api_key`, `authorization`, `credential`, `card`,
+`cardnumber`, `cvv`, `ssn`, `otp`, `refresh_token`, `passwd`, `pwd`, `jwt`, `bearer`,
+`cookie`, `sessionid`), and by substring against `password`,
+`secret`, `token`, `credential`, `apikey`, `privatekey`. The substring pass is what catches
+`access_token`, `client_secret`, and `id_token` — the fields API bodies actually carry,
+which an exact-match list misses. It deliberately does not match a bare `key`, which would
+redact `monkey`. Over-redacting a field like `tokenizer_version` is an accepted cost of
+that trade and is pinned by a test. Matches are replaced with `"[redacted]"` in place,
+preserving the surrounding structure so the log still shows the shape of what happened.
+
+A caller's own `redactKeys` **extends** the defaults rather than replacing them, so no
+configuration mistake can switch `password` redaction off. Narrowing is done the other
+way, with `allowFields: ['orderId', 'status']`, which captures nothing but the named
+fields.
+
+A body that arrives as a JSON *string* rather than a parsed object is parsed and redacted
+too — an unparsed `'{"password":"x"}'` would otherwise pass straight through, since
+redaction walks object keys. Free-text strings are left alone; no pattern matching is
+attempted inside prose.
 
 **All of this runs in the client, before the entry is queued.** Secrets therefore never
 cross the network, never enter the gateway's memory, and never land in the on-disk spool —
-which matters, because that spool is a plaintext file on an application host.
+which matters, because that spool is a plaintext file on an application host. Redaction
+also never throws: every entry point fails closed to an `[unredactable]` marker, because a
+logger that throws from inside a request handler takes down the request it was logging.
+
+**A known limit, recorded rather than assumed:** a key spelled with a Unicode homoglyph —
+`pаssword` with a Cyrillic `а` — does not match and is not redacted. Defending against an
+attacker who controls their own field names is not what this guards against; it guards
+against ordinary application code logging ordinary fields.
 
 **Body capture is a policy, not a boolean**, because bodies dominate storage:
 
