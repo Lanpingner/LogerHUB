@@ -368,8 +368,12 @@ export function createCore(opts: LoggerOptions): LoggerCore {
             sent.set(batch.id, { batch, fromStore: true })
             continue
           }
-          // The window closed under us: hand back every claim we cannot honour, or they
-          // would sit unclaimable until the claim expires.
+          // Unreachable in the current call graph: `send` only refuses a claimed batch over a
+          // duplicate id, which needs an unclaimed row whose id is still pending, and nothing
+          // produces that — `storeInFlight` writes only when closing or when the stream is
+          // down, and `close()` sets `closed` before calling it, so no drain follows. Kept
+          // deliberately: if a future caller breaks that invariant, this turns an unexpected
+          // state into an immediate retry instead of a row stalling for `staleClaimMs`.
           for (let j = i; j < claimed.length; j++) store.release(claimed[j].id)
           return
         }
