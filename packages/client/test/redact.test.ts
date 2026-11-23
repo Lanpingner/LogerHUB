@@ -62,9 +62,31 @@ test('redacts falsy and null secret values too', () => {
     .toEqual({ password: '[redacted]', pass: '[redacted]', cvv: '[redacted]' })
 })
 
-test('custom redactKeys replace the defaults and match case-insensitively', () => {
-  expect(redactBody({ Foo: 1, password: 'p' }, { redactKeys: ['FOO'] }))
-    .toEqual({ Foo: '[redacted]', password: 'p' })
+test('custom redactKeys extend the defaults: both the custom key and a default are redacted', () => {
+  expect(redactBody({ internal_ref: 'r', password: 'p', name: 'n' }, { redactKeys: ['internal_ref'] }))
+    .toEqual({ internal_ref: '[redacted]', password: '[redacted]', name: 'n' })
+})
+
+test('custom redactKeys match case- and punctuation-insensitively', () => {
+  expect(redactBody({ Foo: 1, 'F-O_o': 2 }, { redactKeys: ['FOO'] }))
+    .toEqual({ Foo: '[redacted]', 'F-O_o': '[redacted]' })
+})
+
+test.each([
+  'access_token', 'accessToken', 'Access-Token', 'ACCESS TOKEN', 'client_secret', 'id_token',
+  'refreshToken', 'x-api-key', 'X-API-KEY', 'userPassword', 'private_key', 'privateKey',
+  'db_credentials', 'Pass', 'card_number',
+])('key %s is redacted after normalisation', (key) => {
+  expect(redactBody({ [key]: 'v' })).toEqual({ [key]: '[redacted]' })
+})
+
+test.each(['monkey', 'keyboard', 'public_key_id', 'passenger', 'cardinal'])(
+  'key %s is not redacted (no bare "key" substring match)', (key) => {
+    expect(redactBody({ [key]: 'v' })).toEqual({ [key]: 'v' })
+  })
+
+test('tokenizer_version is over-redacted because it contains "token" (accepted cost)', () => {
+  expect(redactBody({ tokenizer_version: '2' })).toEqual({ tokenizer_version: '[redacted]' })
 })
 
 test('class instances and toJSON values are walked, not skipped', () => {

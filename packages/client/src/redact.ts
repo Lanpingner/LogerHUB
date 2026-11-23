@@ -9,6 +9,11 @@ export const DEFAULT_REDACT_KEYS: string[] = [
   'credential', 'card', 'cardnumber', 'cvv', 'ssn', 'otp', 'refresh_token',
 ]
 
+/** Keys containing any of these (after normalisation) are redacted. Deliberately no bare "key". */
+const SECRET_SUBSTRINGS = ['password', 'secret', 'token', 'credential', 'apikey', 'privatekey']
+
+const normaliseKey = (k: string): string => k.toLowerCase().replace(/[^a-z0-9]/g, '')
+
 const REDACTED = '[redacted]'
 const CIRCULAR = '[circular]'
 
@@ -36,10 +41,17 @@ export function redactHeaders(
 
 /**
  * Replaces the value of every secret-bearing key, at any depth, with `[redacted]`.
+ * Keys are normalised (lower-cased, non-alphanumerics stripped), then matched exactly against
+ * the default and custom lists, or by containing a secret substring such as `token`.
  * With `allowFields`, only those top-level fields survive (and are still redacted).
  */
 export function redactBody(value: unknown, opts: RedactOptions = {}): unknown {
-  const secret = new Set((opts.redactKeys ?? DEFAULT_REDACT_KEYS).map((k) => k.toLowerCase()))
+  // Custom keys extend the defaults; narrowing is what allowFields is for.
+  const exact = new Set([...DEFAULT_REDACT_KEYS, ...(opts.redactKeys ?? [])].map(normaliseKey))
+  const isSecret = (key: string): boolean => {
+    const n = normaliseKey(key)
+    return exact.has(n) || SECRET_SUBSTRINGS.some((s) => n.includes(s))
+  }
   const allow = opts.allowFields ? new Set(opts.allowFields) : undefined
   const ancestors = new Set<object>()
 
@@ -59,7 +71,7 @@ export function redactBody(value: unknown, opts: RedactOptions = {}): unknown {
       const entries: [string, unknown][] = []
       for (const [k, child] of Object.entries(node)) {
         if (top && allow && !allow.has(k)) continue
-        entries.push([k, secret.has(k.toLowerCase()) ? REDACTED : walk(child, false)])
+        entries.push([k, isSecret(k) ? REDACTED : walk(child, false)])
       }
       return Object.fromEntries(entries)   // own-property semantics, so a "__proto__" key stays data
     } finally {
