@@ -128,6 +128,38 @@ when your own nginx is in front — it is off by default.
 Your services connect to `wss://<your domain>/v1/stream`. The console is on the
 same domain, so there is one certificate and no CORS.
 
+### If the build stalls
+
+The symptom is `pnpm install` sitting at `Progress: resolved 1, reused 0,
+downloaded 0, added 0` for minutes. The build is waiting on the npm registry,
+not working. Three causes, in the order they are worth checking:
+
+```bash
+# 1. Can a container reach the registry at all, and how fast?
+docker run --rm node:24-alpine \
+  sh -c 'time wget -qO- https://registry.npmjs.org/ws > /dev/null'
+
+# 2. What does DNS answer with? An IPv6-only answer on a host with no IPv6
+#    route is the usual cause: every connection waits for a timeout first.
+docker run --rm node:24-alpine nslookup registry.npmjs.org
+
+# 3. Is there a proxy the build needs to know about?
+docker run --rm -e HTTP_PROXY -e HTTPS_PROXY node:24-alpine env | grep -i proxy
+```
+
+The Dockerfiles already pass `--dns-result-order=ipv4first`, which fixes the
+IPv6 case, and keep the pnpm store on a build cache mount so a rebuild reuses
+what it already downloaded. If a proxy is in play, pass it to the build:
+
+```bash
+docker compose build --build-arg HTTP_PROXY="$HTTP_PROXY" \
+                     --build-arg HTTPS_PROXY="$HTTPS_PROXY"
+```
+
+Both services build at once, each installing its own dependencies, so a slow
+link is hit twice in parallel. `docker compose build ingest` then
+`docker compose build web` is slower overall but easier to watch.
+
 ### Checking it works
 
 ```bash
