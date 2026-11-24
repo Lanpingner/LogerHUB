@@ -70,6 +70,6 @@
     "express": "^5.3.0",
     "express4": "npm:express@^4.22.3",
     "supertest": "^7.3.2",
-    "@logguber/shared": "workspace:*"
+    "@logguber/shared": "*"
   }
 }

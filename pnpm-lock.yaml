@@ -24,7 +24,7 @@ importers:
   apps/ingest:
     dependencies:
       '@logguber/shared':
-        specifier: workspace:*
+        specifier: '*'
         version: link:../../packages/shared
       ws:
         specifier: ^8.18.0
@@ -52,7 +52,7 @@ importers:
         specifier: ^11.14.0
         version: 11.14.1(@emotion/react@11.14.0(@types/react@19.3.0)(react@19.3.1))(@types/react@19.3.0)(react@19.3.1)
       '@logguber/shared':
-        specifier: workspace:*
+        specifier: '*'
         version: link:../../packages/shared
       '@monaco-editor/react':
         specifier: ^4.7.0
@@ -111,7 +111,7 @@ importers:
         version: 8.23.0
     devDependencies:
       '@logguber/shared':
-        specifier: workspace:*
+        specifier: '*'
         version: link:../shared
       '@types/compression':
         specifier: ^1.8.1
