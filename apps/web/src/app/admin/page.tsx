@@ -3,6 +3,14 @@ import { revalidatePath } from 'next/cache'
 import { currentOperator } from '../../lib/auth'
 import { disableKey, keys, labels, putLabel, recentErrors, saveSettings, settings } from '../../lib/store'
 
+/** Server actions are independently addressable POST endpoints: the page's own
+ *  auth check does not protect them, so every action re-verifies the session. */
+async function requireOperator() {
+  const operator = await currentOperator()
+  if (!operator) throw new Error('unauthorised')
+  return operator
+}
+
 const INGEST_URL = (process.env.INGEST_INTERNAL_URL ?? 'http://localhost:8080').replace(/\/$/, '')
 const CONSOLE_SECRET = process.env.CONSOLE_SECRET ?? ''
 
@@ -39,6 +47,7 @@ export default async function AdminPage() {
 
   async function revoke(form: FormData) {
     'use server'
+    await requireOperator()
     disableKey(String(form.get('id') ?? ''))
     await notifyGateway()
     revalidatePath('/admin')
@@ -46,6 +55,7 @@ export default async function AdminPage() {
 
   async function saveHierarchy(form: FormData) {
     'use server'
+    await requireOperator()
     const raw = String(form.get('levels') ?? '')
     const levels = raw
       .split('\n')
@@ -69,6 +79,7 @@ export default async function AdminPage() {
 
   async function saveOps(form: FormData) {
     'use server'
+    await requireOperator()
     const current = settings()
     const allowlist = String(form.get('allowlist') ?? '')
       .split(/[\s,]+/)
@@ -86,6 +97,7 @@ export default async function AdminPage() {
 
   async function nameValue(form: FormData) {
     'use server'
+    await requireOperator()
     const key = String(form.get('dim_key') ?? '')
     const value = String(form.get('dim_value') ?? '')
     const display = String(form.get('display') ?? '')

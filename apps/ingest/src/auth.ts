@@ -5,8 +5,10 @@ export function parseKey(header: string | undefined): { keyId: string; secret: s
   if (!header) return null
   const m = /^Bearer\s+(.+)$/i.exec(header.trim())
   const raw = m ? m[1] : header.trim()
-  const parts = raw.split('_')
-  if (parts.length !== 3 || parts[0] !== 'lgb' || !parts[1] || !parts[2]) return null
+  // Split on the first two underscores only: the secret is base64url, which
+  // includes '_', so splitting on every underscore rejects valid keys.
+  const parts = /^lgb_([^_]+)_(.+)$/.exec(raw)
+  if (!parts) return null
   return { keyId: parts[1], secret: parts[2] }
 }
 
