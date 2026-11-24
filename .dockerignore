@@ -1,0 +1,32 @@
+# The build installs its own dependencies; the host's tree is a different
+# package manager's layout and copying it over the image's breaks the build.
+# It is also the bulk of the build context, so excluding it is most of the
+# difference between a fast build and a slow one.
+node_modules
+**/node_modules
+
+# Build output: each image builds what it needs.
+dist
+**/dist
+.next
+**/.next
+*.tgz
+
+# Local state that must never end up in an image.
+.env
+.env.*
+data
+**/data
+**/.logerhub-spool
+**/.logguber-spool
+**/spool
+
+.git
+.github
+.superpowers
+docs
+
+# Test and tooling files the runtime does not need.
+**/*.test.ts
+**/test
+coverage
