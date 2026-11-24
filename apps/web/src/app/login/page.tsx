@@ -48,10 +48,10 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
 
         <div style={{ display: 'grid', gap: 12, background: '#0D131A', border: '1px solid #25313D', borderRadius: 4, padding: 16 }}>
           <label style={{ display: 'grid', gap: 4 }}>
-            <span style={{ fontSize: 11, color: '#8492A3' }}>Email</span>
+            <span style={{ fontSize: 11, color: '#8492A3' }}>Email or username</span>
             <input
               name="email"
-              type="email"
+              type="text"
               required
               autoFocus
               autoComplete="username"

@@ -85,7 +85,10 @@ CREATE TABLE IF NOT EXISTS operators (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- 1 while the account still has the password it was created with. The console
+  -- serves nothing but the change-password screen until it is cleared.
+  must_change_password INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS ingest_errors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +158,17 @@ export function openStore(file: string) {
     // A store we cannot inspect is one we should not silently rewrite.
   }
 
+  // Operators gained `must_change_password`. Added in place, because unlike the
+  // dedupe ledger this table is the only record of who can log in.
+  try {
+    const cols = db.prepare('PRAGMA table_info(operators)').all() as { name: string }[]
+    if (cols.length && !cols.some((c) => c.name === 'must_change_password')) {
+      db.exec('ALTER TABLE operators ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
+    }
+  } catch {
+    // An operator table we cannot inspect is one we should not alter.
+  }
+
   const st = {
     keyByKeyId: db.prepare('SELECT * FROM api_keys WHERE key_id = ?'),
     touchKey: db.prepare('UPDATE api_keys SET last_used_at = ?, last_used_ip = ? WHERE id = ?'),
@@ -196,7 +210,13 @@ export function openStore(file: string) {
     usageAtDepth: db.prepare(
       'SELECT hour, dims, lines, bytes, requests, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour',
     ),
-    insertOperator: db.prepare('INSERT INTO operators (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'),
+    insertOperator: db.prepare(
+      'INSERT INTO operators (id, email, password_hash, created_at, must_change_password) VALUES (?, ?, ?, ?, ?)',
+    ),
+    countOperators: db.prepare('SELECT COUNT(*) AS n FROM operators'),
+    setPassword: db.prepare(
+      'UPDATE operators SET password_hash = ?, must_change_password = 0 WHERE email = ?',
+    ),
   }
 
   let rolledUpOverflow = 0
@@ -339,7 +359,10 @@ export function openStore(file: string) {
     putLabel: (k: string, v: string, name: string) => st.putLabel.run(k, v, name),
     recentErrors: () => st.recentErrors.all() as Record<string, unknown>[],
     operatorByEmail: (email: string) => st.operatorByEmail.get(email) as Record<string, unknown> | undefined,
-    insertOperator: (id: string, email: string, hash: string) => st.insertOperator.run(id, email, hash, Date.now()),
+    insertOperator: (id: string, email: string, hash: string, mustChange = false) =>
+      st.insertOperator.run(id, email, hash, Date.now(), mustChange ? 1 : 0),
+    operatorCount: (): number => Number((st.countOperators.get() as { n: number } | undefined)?.n ?? 0),
+    setOperatorPassword: (email: string, hash: string) => st.setPassword.run(hash, email),
     /** Rows at exactly one hierarchy depth, so no aggregation across children. */
     usage(opts: { depth: number; sinceHours: number; prefix?: Record<string, string> }): UsageRow[] {
       const since = Math.floor(Date.now() / 1000) - opts.sinceHours * 3600

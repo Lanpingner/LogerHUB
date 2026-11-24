@@ -1,4 +1,6 @@
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto'
+// Minting and checking live in @logguber/shared, because the console mints keys
+// too and two copies would be two chances for the hash format to drift.
+export { hashSecret, mintKey, secretMatches } from '@logguber/shared/keys'
 
 /** `lgb_<key_id>_<secret>` */
 export function parseKey(header: string | undefined): { keyId: string; secret: string } | null {
@@ -10,23 +12,6 @@ export function parseKey(header: string | undefined): { keyId: string; secret: s
   const parts = /^lgb_([^_]+)_(.+)$/.exec(raw)
   if (!parts) return null
   return { keyId: parts[1], secret: parts[2] }
-}
-
-export function hashSecret(secret: string): string {
-  return createHash('sha256').update(secret).digest('hex')
-}
-
-export function secretMatches(secret: string, expectedHash: string): boolean {
-  const a = Buffer.from(hashSecret(secret), 'hex')
-  let b: Buffer
-  try { b = Buffer.from(expectedHash, 'hex') } catch { return false }
-  return a.length === b.length && timingSafeEqual(a, b)
-}
-
-export function mintKey(): { full: string; keyId: string; secret: string; hash: string } {
-  const keyId = randomBytes(6).toString('hex')
-  const secret = randomBytes(24).toString('base64url')
-  return { full: `lgb_${keyId}_${secret}`, keyId, secret, hash: hashSecret(secret) }
 }
 
 function ipToBytes(ip: string): Uint8Array | null {

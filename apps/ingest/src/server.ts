@@ -3,7 +3,8 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { HELLO_DEFAULTS, LEVELS, LOKI_LIMITS, type BatchFrame, type LogEntry } from '@logguber/shared'
 import { openStore, type Store } from './store.ts'
 import { clientIp, ipAllowed, parseKey, secretMatches } from './auth.ts'
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { hashPassword } from '@logguber/shared/password'
 import { pushToLoki } from './loki.ts'
 import { createBus, type Filter, type LiveEntry } from './bus.ts'
 import { rollupRows } from './rollup.ts'
@@ -34,6 +35,32 @@ const BATCH_BURST = Number(process.env.BATCH_BURST ?? 50)
 const ENV_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i
 
 const store: Store = openStore(DB_FILE)
+
+/**
+ * First start with an empty operator table gets `admin` / `admin`, flagged so the
+ * console serves nothing but the change-password screen until it is replaced.
+ *
+ * This is a real exposure while it lasts: anyone who reaches the console before
+ * the operator does gets in. It is logged loudly for that reason, and the flag is
+ * what bounds the window — the default credentials cannot be used to read logs,
+ * only to set a password. Set BOOTSTRAP_ADMIN=off to disable it and use
+ * `seed.ts operator` instead.
+ */
+function bootstrapOperator(): void {
+  if (process.env.BOOTSTRAP_ADMIN === 'off') return
+  try {
+    if (store.operatorCount() > 0) return
+    store.insertOperator(randomUUID(), 'admin', hashPassword('admin'), true)
+    log('bootstrapped the first operator', {
+      user: 'admin',
+      password: 'admin',
+      warning: 'change it at first login; the console will not serve anything else until you do',
+    })
+  } catch (e) {
+    log('could not bootstrap the first operator', { error: String(e) })
+  }
+}
+bootstrapOperator()
 const bus = createBus()
 const levelSet = new Set<string>(LEVELS)
 

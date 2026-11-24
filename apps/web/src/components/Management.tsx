@@ -12,6 +12,7 @@ import { Panel } from './Panel'
 import { HealthDot } from './indicators'
 import { useConsole } from '../store/console'
 import { nameClientAction, revokeKeyAction, saveAccessAction, saveHierarchyAction } from '../app/actions'
+import { CreateKey } from './CreateKey'
 
 export interface KeyView {
   id: string
@@ -34,7 +35,7 @@ function ago(ms: number | null): string {
   return Math.round(d / 86_400_000) + 'd ago'
 }
 
-export function ApiKeys({ keys }: { keys: KeyView[] }) {
+export function ApiKeys({ keys, knownServices = [] }: { keys: KeyView[]; knownServices?: string[] }) {
   const [pending, start] = useTransition()
   const live = keys.filter((k) => !k.disabled_at).length
 
@@ -118,33 +119,8 @@ export function ApiKeys({ keys }: { keys: KeyView[] }) {
           </Box>
         </Panel>
 
-        <Panel title="Creating a key" hint="from the gateway, so the secret never passes through a browser" minHeight={0}>
-          <Box sx={{ fontSize: 11.5, color: C.text2, lineHeight: 1.8 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-              <KeyRound size={13} color={C.accent} />
-              Each service gets its own key, so a compromised host can only forge its own logs.
-            </Box>
-            <Box
-              component="pre"
-              sx={{
-                m: 0,
-                p: 1.5,
-                background: C.bg,
-                border: '1px solid ' + C.border,
-                borderRadius: '4px',
-                fontFamily: MONO,
-                fontSize: 11,
-                color: C.text,
-                overflowX: 'auto',
-              }}
-            >
-              pnpm --filter @logguber/ingest seed key &lt;name&gt; &lt;services&gt; [envs]
-            </Box>
-            <Box sx={{ mt: 1, color: C.muted }}>
-              The secret prints once; only its hash is stored. Revoking here closes the key&apos;s live sockets as well
-              as refusing its next handshake.
-            </Box>
-          </Box>
+        <Panel title="Create a key" hint="the secret is shown once and never stored" minHeight={0}>
+          <CreateKey knownServices={knownServices} />
         </Panel>
       </Box>
     </Box>

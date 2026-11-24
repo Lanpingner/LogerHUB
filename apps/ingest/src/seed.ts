@@ -1,19 +1,10 @@
-import { scryptSync, randomBytes, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { openStore } from './store.ts'
 import { mintKey } from './auth.ts'
+import { hashPassword, MIN_PASSWORD_LENGTH } from '@logguber/shared/password'
 
 const DB_FILE = process.env.LOGGUBER_DB ?? './data/logguber.db'
 const store = openStore(DB_FILE)
-
-// Cost above Node's defaults (N=16384). The parameters are stored in the hash so
-// they can be raised later without invalidating existing operators.
-const SCRYPT = { N: 1 << 17, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }
-
-function hashPassword(pw: string): string {
-  const salt = randomBytes(16).toString('hex')
-  const hash = scryptSync(pw, salt, 64, SCRYPT).toString('hex')
-  return 'scrypt$' + SCRYPT.N + ':' + SCRYPT.r + ':' + SCRYPT.p + '$' + salt + '$' + hash
-}
 
 /** Reads a password without putting it in argv, where any process on the host
  *  can read it from /proc, and where it lands in shell history. */
@@ -65,8 +56,8 @@ if (cmd === 'operator') {
     process.exit(1)
   }
   const password = await readPassword()
-  if (password.length < 12) {
-    console.error('Password must be at least 12 characters.')
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    console.error('Password must be at least ' + MIN_PASSWORD_LENGTH + ' characters.')
     process.exit(1)
   }
   store.insertOperator(randomUUID(), email, hashPassword(password))

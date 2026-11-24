@@ -1,8 +1,19 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
+import { randomUUID } from 'node:crypto'
+import { mintKey } from '@logguber/shared/keys'
+import { hashPassword, verifyPassword, MIN_PASSWORD_LENGTH } from '@logguber/shared/password'
 import { currentOperator, logout } from '../lib/auth'
-import { disableKey, putLabel, saveSettings, settings } from '../lib/store'
+import {
+  disableKey,
+  insertKey,
+  operatorByEmail,
+  putLabel,
+  saveSettings,
+  setOperatorPassword,
+  settings,
+} from '../lib/store'
 
 const INGEST_URL = (process.env.INGEST_INTERNAL_URL ?? 'http://localhost:8080').replace(/\/$/, '')
 const CONSOLE_SECRET = process.env.CONSOLE_SECRET ?? ''
@@ -78,4 +89,87 @@ export async function nameClientAction(dimKey: string, value: string, display: s
 
 export async function signOutAction(): Promise<void> {
   await logout()
+}
+
+/**
+ * The current password is required even when the account is being forced to
+ * change it: a session cookie alone must not be enough to take an account over,
+ * or a stolen cookie becomes permanent access.
+ */
+export async function changePasswordAction(
+  current: string,
+  next: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const operator = await requireOperator()
+  const row = operatorByEmail(operator.email)
+  if (!row) return { ok: false, error: 'That account no longer exists.' }
+  if (!verifyPassword(current, row.password_hash)) return { ok: false, error: 'The current password is wrong.' }
+  if (next.length < MIN_PASSWORD_LENGTH) {
+    return { ok: false, error: `Use at least ${MIN_PASSWORD_LENGTH} characters.` }
+  }
+  if (next === current) return { ok: false, error: 'That is the password you already have.' }
+  // The one value that must never survive this screen.
+  if (next.toLowerCase() === 'admin') return { ok: false, error: 'Pick something other than the default.' }
+  if (!setOperatorPassword(operator.email, hashPassword(next))) {
+    return { ok: false, error: 'Could not save the new password.' }
+  }
+  revalidatePath('/', 'layout')
+  return { ok: true }
+}
+
+const KEY_NAME = /^[\w .-]{1,64}$/
+/** Matches the gateway's own check, so a key the console issues cannot be unusable. */
+const SCOPE_ITEM = /^[a-z0-9][a-z0-9_-]{0,63}$/i
+
+function scopeList(raw: string): string[] {
+  return [...new Set(raw.split(/[\s,]+/).map((v) => v.trim()).filter(Boolean))]
+}
+
+/**
+ * Mints a key and returns the secret ONCE. It is never stored and cannot be shown
+ * again — only its hash is kept, so a leaked database does not hand over the keys
+ * themselves.
+ */
+export async function createKeyAction(
+  name: string,
+  servicesRaw: string,
+  envsRaw: string,
+  allowlistRaw: string,
+): Promise<{ ok: true; secret: string; keyId: string } | { ok: false; error: string }> {
+  await requireOperator()
+  const trimmed = name.trim()
+  if (!KEY_NAME.test(trimmed)) return { ok: false, error: 'Give the key a name: letters, digits, dot, dash, space.' }
+
+  const services = scopeList(servicesRaw)
+  if (services.length === 0) return { ok: false, error: 'Name at least one service the key may write.' }
+  if (!services.every((v) => SCOPE_ITEM.test(v))) return { ok: false, error: 'Service names must be alphanumeric.' }
+
+  const envs = scopeList(envsRaw)
+  // Required, not optional: a key with no environment scope may write any
+  // environment name it likes, and each distinct name becomes a Loki stream.
+  if (envs.length === 0) return { ok: false, error: 'Name at least one environment, such as prod.' }
+  if (!envs.every((v) => SCOPE_ITEM.test(v))) return { ok: false, error: 'Environment names must be alphanumeric.' }
+
+  const allowlist = scopeList(allowlistRaw)
+  if (!allowlist.every((v) => /^[0-9a-f.:]+(\/\d{1,3})?$/i.test(v))) {
+    return { ok: false, error: 'Allowed-from entries must be IP addresses or CIDR ranges.' }
+  }
+
+  const minted = mintKey()
+  try {
+    insertKey({
+      id: randomUUID(),
+      name: trimmed,
+      key_id: minted.keyId,
+      secret_hash: minted.hash,
+      service_scope: services,
+      env_scope: envs,
+      ip_allowlist: allowlist,
+    })
+  } catch (e) {
+    return { ok: false, error: 'Could not save the key: ' + String(e) }
+  }
+  await notifyGateway()
+  revalidatePath('/keys')
+  return { ok: true, secret: minted.full, keyId: minted.keyId }
 }

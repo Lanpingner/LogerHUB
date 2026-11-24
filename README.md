@@ -99,6 +99,21 @@ IP allowlist checks the wrong address.
 
 Create your login and one key per service:
 
+**On first start the gateway creates `admin` / `admin`** and says so in its logs.
+Log in with it and the console serves nothing but a change-password screen until
+you replace it — no page, no data, no API key.
+
+That default is a real exposure for as long as it lasts: anyone who reaches the
+console before you do can set the password themselves. So log in immediately
+after the first `make deploy`, or set `BOOTSTRAP_ADMIN=off` in `.env` and create
+the account by hand, below.
+
+```bash
+docker compose logs ingest | grep bootstrapped
+```
+
+### Creating accounts by hand
+
 The operator password is read from stdin, never from the command line, so it
 stays out of your shell history and out of `/proc` where any other process on
 the host could read it. Note `exec -T`, which is what passes stdin through:
@@ -124,6 +139,11 @@ docker compose exec -T -e LOGGUBER_DB=/data/logguber.db ingest \
 
 Each key's secret prints once; only its hash is stored. Repeat per service, and
 list them later with `… seed.ts list`.
+
+Or create keys in the console, under **API Keys** — same minting, same scope
+rules, and the secret is shown once there too. That does mean it passes through
+a browser, which the CLI avoided; it is the same bargain GitHub and Stripe make,
+and worth it so a key can be issued without shell access to the gateway.
 
 ### If you would rather not run a proxy
 

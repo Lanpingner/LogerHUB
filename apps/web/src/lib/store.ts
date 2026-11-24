@@ -169,6 +169,38 @@ export function keys(): KeyRow[] {
   })
 }
 
+export interface NewKey {
+  id: string
+  name: string
+  key_id: string
+  secret_hash: string
+  service_scope: string[]
+  env_scope: string[]
+  ip_allowlist: string[]
+}
+
+/** The console writes the same row shape the seed CLI does; the gateway reads either. */
+export function insertKey(k: NewKey): void {
+  withDb((db) =>
+    db
+      .prepare(
+        `INSERT INTO api_keys (id, name, key_id, secret_hash, service_scope, env_scope, ip_allowlist, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        k.id,
+        k.name,
+        k.key_id,
+        k.secret_hash,
+        JSON.stringify(k.service_scope),
+        JSON.stringify(k.env_scope),
+        JSON.stringify(k.ip_allowlist),
+        Date.now(),
+      ),
+    false,
+  )
+}
+
 export function disableKey(id: string): void {
   withDb((db) => db.prepare('UPDATE api_keys SET disabled_at = ? WHERE id = ?').run(Date.now(), id), false)
 }
@@ -231,15 +263,38 @@ export function recentErrors(): IngestError[] {
   }
 }
 
-export function operatorByEmail(email: string): { id: string; email: string; password_hash: string } | undefined {
+export interface OperatorRow {
+  id: string
+  email: string
+  password_hash: string
+  /** 1 while the account still has the password it was created with. */
+  must_change_password: number
+}
+
+export function operatorByEmail(email: string): OperatorRow | undefined {
   try {
     return withDb(
-      (db) => db.prepare('SELECT id, email, password_hash FROM operators WHERE email = ?').get(email) as
-        | { id: string; email: string; password_hash: string }
-        | undefined,
+      (db) =>
+        db
+          .prepare('SELECT id, email, password_hash, must_change_password FROM operators WHERE email = ?')
+          .get(email) as OperatorRow | undefined,
     )
   } catch {
     return undefined
+  }
+}
+
+/** Clears the must-change flag as part of the same write, so the two cannot diverge. */
+export function setOperatorPassword(email: string, hash: string): boolean {
+  try {
+    return withDb((db) => {
+      const r = db
+        .prepare('UPDATE operators SET password_hash = ?, must_change_password = 0 WHERE email = ?')
+        .run(hash, email)
+      return Number(r.changes) > 0
+    }, false)
+  } catch {
+    return false
   }
 }
 
