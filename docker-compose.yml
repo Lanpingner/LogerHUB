@@ -47,6 +47,10 @@ services:
       CONSOLE_SECRET: ${CONSOLE_SECRET:?set CONSOLE_SECRET in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       NODE_ENV: production
+      # Only variables named here reach the container; .env on its own just
+      # feeds interpolation. Without this line, setting COOKIE_INSECURE=1 in
+      # .env looks like it worked and changes nothing.
+      COOKIE_INSECURE: ${COOKIE_INSECURE:-}
     volumes:
       # Same file as the gateway: SQLite needs a shared filesystem, which is why
       # these two services must stay on one host.
