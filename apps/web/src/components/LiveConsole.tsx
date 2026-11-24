@@ -25,7 +25,7 @@ import {
 } from 'lucide-react'
 import { DEFAULT_COLUMNS, useConsole, type ColumnKey } from '../store/console'
 import { C, MONO } from '../lib/tokens'
-import { matches, parse } from '../lib/query'
+import { matches, parse } from '@logguber/shared'
 import type { Bucket, LogRow, SearchResponse } from '../lib/types'
 import { QueryEditor } from './QueryEditor'
 import { TrafficHistogram } from './TrafficHistogram'

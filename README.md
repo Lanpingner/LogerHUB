@@ -26,32 +26,102 @@ Four parts:
 | `apps/web` | The console: search, live tail, usage, admin. |
 | `packages/shared` | The wire protocol both sides agree on. |
 
-## Run it
+## Deploy it
 
-Needs Node 24+ and pnpm. For the real deployment you also need Docker.
+One server runs everything: Loki, the ingest gateway, the console and Caddy for
+TLS. Needs Docker and a domain pointing at the box.
 
 ```bash
-pnpm install
-cp .env.example .env     # then fill in both secrets: openssl rand -hex 32
+git clone <this repo> && cd Logguber
+cp .env.example .env
+```
+
+Fill in `.env` — both secrets must be long random strings:
+
+```bash
+CONSOLE_SECRET=$(openssl rand -hex 32)   # console to gateway, internal only
+SESSION_SECRET=$(openssl rand -hex 32)   # signs the operator's session cookie
+LOGGUBER_DOMAIN=logs.example.com         # Caddy gets a certificate for this
+```
+
+Then:
+
+```bash
 docker compose up -d --build
 ```
 
-Create an operator login and a key per service:
+Caddy is the only service with published ports (80 and 443). Loki, the gateway
+and the console are reachable only from inside the compose network, and
+`/internal/*` is refused from outside.
+
+Create your login and one key per service:
 
 ```bash
-pnpm --filter @logguber/ingest seed operator you@example.com 'a-long-password'
-pnpm --filter @logguber/ingest seed key office-api office-api prod
-pnpm --filter @logguber/ingest seed key public-api public-api prod
-pnpm --filter @logguber/ingest seed key chat-api  chat-api  prod
-pnpm --filter @logguber/ingest seed key chat-ws   chat-ws   prod
+docker compose exec -e LOGGUBER_DB=/data/logguber.db ingest \
+  node --experimental-strip-types apps/ingest/src/seed.ts operator you@example.com 'a-long-password'
+
+docker compose exec -e LOGGUBER_DB=/data/logguber.db ingest \
+  node --experimental-strip-types apps/ingest/src/seed.ts key office-api office-api prod
 ```
 
-Each key's secret is printed once and only its hash is stored. A key is scoped to
-the services and environments it may write, so a compromised host can only forge
-its own logs.
+Each key's secret prints once; only its hash is stored. Repeat for each service.
+Open your domain and sign in.
 
-Then open the console (`https://localhost` behind Caddy, or `pnpm --filter
-@logguber/web dev` on port 3000 while developing).
+### What runs where
+
+| Service | Port | Reachable from |
+|---|---|---|
+| caddy | 80, 443 | the internet |
+| web (console) | 3000 | caddy only |
+| ingest (gateway) | 8080 | caddy only, on `/v1/*` and `/health` |
+| loki | 3100 | gateway and console only |
+
+Your services connect to `wss://<your domain>/v1/stream`. The console is on the
+same domain, so there is one certificate and no CORS.
+
+### Checking it works
+
+```bash
+curl https://<your domain>/health
+
+curl -X POST https://<your domain>/v1/logs \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"batch_id":"test-1","service":"office-api","env":"prod","entries":[
+       {"ts":"2026-11-24T09:51:02.124Z","level":"info","msg":"hello"}]}'
+```
+
+A `202 {"accepted":1}` means the whole path works: auth, scope check, counters
+and the Loki write.
+
+### Updating
+
+```bash
+git pull && docker compose up -d --build
+```
+
+The SQLite store and Loki's chunks live in named volumes, so they survive a
+rebuild. Back up by copying the `store` volume — it is one file.
+
+### Keeping it on one host
+
+The gateway and the console share one SQLite file, so they must stay on the same
+machine. That is a deliberate ceiling, not an oversight: it keeps the deployment
+to four containers and one file to back up. Splitting them across machines — or
+putting that file on NFS, which breaks SQLite's locking — means moving to
+Postgres first. All database access sits behind one thin module so that swap is
+contained.
+
+## Developing
+
+```bash
+pnpm install
+docker run -d --name loki -p 3100:3100 \
+  -v "$PWD/deploy/loki.yaml:/etc/loki/loki.yaml:ro" grafana/loki:3.7.5 -config.file=/etc/loki/loki.yaml
+
+pnpm --filter @logguber/ingest dev     # gateway on 8080
+pnpm --filter @logguber/web dev        # console on 3000
+node traffic.mjs                       # optional: simulated traffic
+```
 
 ### In your Express service
 

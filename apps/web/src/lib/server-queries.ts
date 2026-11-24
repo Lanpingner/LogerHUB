@@ -1,4 +1,4 @@
-import { compile, parse } from './query'
+import { compile, parse } from '@logguber/shared'
 import { keys, settings, totals, usage } from './store'
 
 const LOKI = (process.env.LOKI_URL ?? 'http://localhost:3100').replace(/\/$/, '')

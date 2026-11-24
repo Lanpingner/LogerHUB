@@ -2,6 +2,24 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+export interface UsageRow {
+  hour: number
+  dims: Record<string, string>
+  lines: number
+  bytes: number
+  requests: number
+  errors: number
+}
+
+export interface Totals {
+  label: string
+  dims: Record<string, string>
+  lines: number
+  requests: number
+  errors: number
+  bytes: number
+}
+
 export interface ApiKey {
   id: string
   name: string
@@ -121,6 +139,9 @@ export function openStore(file: string) {
       ON CONFLICT(dim_key, dim_value) DO UPDATE SET display_name = excluded.display_name`),
     recentErrors: db.prepare('SELECT * FROM ingest_errors ORDER BY at DESC LIMIT 100'),
     operatorByEmail: db.prepare('SELECT * FROM operators WHERE email = ?'),
+    usageAtDepth: db.prepare(
+      'SELECT hour, dims, lines, bytes, requests, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour',
+    ),
     insertOperator: db.prepare('INSERT INTO operators (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'),
   }
 
@@ -204,6 +225,39 @@ export function openStore(file: string) {
     recentErrors: () => st.recentErrors.all() as Record<string, unknown>[],
     operatorByEmail: (email: string) => st.operatorByEmail.get(email) as Record<string, unknown> | undefined,
     insertOperator: (id: string, email: string, hash: string) => st.insertOperator.run(id, email, hash, Date.now()),
+    /** Rows at exactly one hierarchy depth, so no aggregation across children. */
+    usage(opts: { depth: number; sinceHours: number; prefix?: Record<string, string> }): UsageRow[] {
+      const since = Math.floor(Date.now() / 1000) - opts.sinceHours * 3600
+      const rows = st.usageAtDepth.all(opts.depth, since) as {
+        hour: number
+        dims: string
+        lines: number
+        bytes: number
+        requests: number
+        errors: number
+      }[]
+      const out: UsageRow[] = []
+      for (const r of rows) {
+        let dims: Record<string, string>
+        try {
+          dims = JSON.parse(r.dims) as Record<string, string>
+        } catch {
+          continue
+        }
+        if (opts.prefix) {
+          let ok = true
+          for (const [k, v] of Object.entries(opts.prefix)) {
+            if (dims[k] !== v) {
+              ok = false
+              break
+            }
+          }
+          if (!ok) continue
+        }
+        out.push({ hour: r.hour, dims, lines: r.lines, bytes: r.bytes, requests: r.requests, errors: r.errors })
+      }
+      return out
+    },
     close: () => db.close(),
   }
 }

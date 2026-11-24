@@ -6,7 +6,7 @@ import Tooltip from '@mui/material/Tooltip'
 import IconButton from '@mui/material/IconButton'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CircleAlert, History, Star, X } from 'lucide-react'
-import { FIELDS, parse, suggest, type Suggestion } from '../lib/query'
+import { FIELDS, parse, suggest, type Suggestion } from '@logguber/shared'
 import { useConsole } from '../store/console'
 import { C, MONO } from '../lib/tokens'
 

@@ -257,6 +257,10 @@ const server = createServer((req, res) => {
         } catch {
           return json(res, 400, { error: 'invalid json' })
         }
+        // The documented HTTP payload names the field `batch_id`, while the
+        // WebSocket frame uses `id`. Accept either so the documented example works.
+        const withId = body as BatchFrame & { service?: string; env?: string; batch_id?: string }
+        if (!withId.id && withId.batch_id) withId.id = withId.batch_id
         const fakeUrl = new URL('http://x/?service=' + encodeURIComponent(body.service ?? '') + '&env=' + encodeURIComponent(body.env ?? ''))
         const auth = authorise(req, fakeUrl)
         if ('close' in auth) return json(res, auth.close === 4401 ? 401 : 403, { error: auth.why })
