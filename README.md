@@ -78,15 +78,31 @@ IP allowlist checks the wrong address.
 
 Create your login and one key per service:
 
-```bash
-docker compose exec -e LOGGUBER_DB=/data/logguber.db ingest \
-  node --experimental-strip-types apps/ingest/src/seed.ts operator you@example.com 'a-long-password'
+The operator password is read from stdin, never from the command line, so it
+stays out of your shell history and out of `/proc` where any other process on
+the host could read it. Note `exec -T`, which is what passes stdin through:
 
+```bash
+# Type it when prompted:
 docker compose exec -e LOGGUBER_DB=/data/logguber.db ingest \
+  node --experimental-strip-types apps/ingest/src/seed.ts operator you@example.com
+
+# Or pipe it, if you are scripting (minimum 12 characters):
+printf %s "$PASSWORD" | docker compose exec -T -e LOGGUBER_DB=/data/logguber.db ingest \
+  node --experimental-strip-types apps/ingest/src/seed.ts operator you@example.com
+```
+
+Then one key per service. The environments are required — a key with no
+environment scope may write any environment name, and each distinct name
+becomes another Loki stream:
+
+```bash
+docker compose exec -T -e LOGGUBER_DB=/data/logguber.db ingest \
   node --experimental-strip-types apps/ingest/src/seed.ts key office-api office-api prod
 ```
 
-Each key's secret prints once; only its hash is stored. Repeat per service.
+Each key's secret prints once; only its hash is stored. Repeat per service, and
+list them later with `… seed.ts list`.
 
 ### If you would rather not run a proxy
 
