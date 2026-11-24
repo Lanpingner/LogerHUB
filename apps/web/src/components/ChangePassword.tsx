@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useTransition } from 'react'
+import { useRouter } from 'next/navigation'
 import { KeyRound, ShieldAlert } from 'lucide-react'
 import { changePasswordAction } from '../app/actions'
 import { C, MONO } from '../lib/tokens'
@@ -25,8 +26,10 @@ export function ChangePassword({ email, forced, minLength }: { email: string; fo
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [pending, start] = useTransition()
+  const router = useRouter()
 
   function submit(form: FormData) {
+    const current = String(form.get('current') ?? '')
     const next = String(form.get('next') ?? '')
     const confirm = String(form.get('confirm') ?? '')
     setError(null)
@@ -35,9 +38,26 @@ export function ChangePassword({ email, forced, minLength }: { email: string; fo
     if (next !== confirm) return setError('The two passwords do not match.')
     if (next.length < minLength) return setError(`Use at least ${minLength} characters.`)
     start(async () => {
-      const result = await changePasswordAction(String(form.get('current') ?? ''), next)
-      if (result.ok) setDone(true)
-      else setError(result.error)
+      let result: { ok: true } | { ok: false; error: string }
+      try {
+        result = await changePasswordAction(current, next)
+      } catch (e) {
+        // Without this an unexpected server failure reaches the browser as an
+        // unhandled rejection, which Next shows as a full error page — the
+        // screen least able to explain what to do about it.
+        setError('The server could not complete that: ' + (e instanceof Error ? e.message : String(e)))
+        return
+      }
+      if (!result.ok) {
+        setError(result.error)
+        return
+      }
+      setDone(true)
+      // The change clears the must-change flag, so the layout's gate now wants
+      // to render the console instead of this screen. `refresh()` asks for that
+      // swap explicitly, rather than leaving the page showing a success message
+      // that the revalidated tree may or may not have already replaced.
+      router.refresh()
     })
   }
 

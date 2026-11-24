@@ -11,3 +11,6 @@ apps/web/.next/
 .env
 .env.*
 !.env.example
+
+# Next/TS build state
+*.tsbuildinfo

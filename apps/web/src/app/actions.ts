@@ -123,7 +123,9 @@ export async function changePasswordAction(
   if (!setOperatorPassword(operator.email, hashPassword(next))) {
     return { ok: false, error: 'Could not save the new password.' }
   }
-  revalidatePath('/', 'layout')
+  // No revalidatePath here: it would swap the layout out from under the form
+  // while the transition that called this is still running. The client calls
+  // router.refresh() once it has the result, which is ordered and visible.
   return { ok: true }
 }
 
