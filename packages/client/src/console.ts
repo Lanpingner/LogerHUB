@@ -133,12 +133,16 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
   if (!cfg?.enabled) return NOOP
 
   const out = cfg.stream ?? process.stdout
-  const isTty = cfg.color ?? Boolean((out as NodeJS.WriteStream).isTTY)
+  const isTty = Boolean((out as NodeJS.WriteStream).isTTY)
   // NO_COLOR is a convention worth honouring: a pipeline that strips colour
   // should not have to filter escape codes out of its logs.
-  const color = isTty && !process.env.NO_COLOR
+  const color = (cfg.color ?? isTty) && !process.env.NO_COLOR
   const label = cfg.label ?? defaultLabel() ?? service
   const minimum = LEVELS.indexOf((cfg.level ?? 'debug') as Level)
+  // Deliberately NOT tied to `color`. Colour is a preference and is safe to force
+  // anywhere; the in-flight block moves the cursor, which only means anything on a
+  // real terminal. Written into a file — under PM2, or any redirect — the movement
+  // is ignored and every redraw stacks another copy of the block instead.
   const showPending = Boolean(cfg.pending) && isTty
   const file = cfg.file
 
@@ -168,6 +172,27 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     )
   }
 
+  /**
+   * Takes the in-flight block off the screen and leaves the cursor where its first
+   * line was. Every redraw starts here: drawing the rows without first going back
+   * over the old ones appends a second block rather than replacing the first, and a
+   * busy service then fills the screen with copies.
+   */
+  function eraseBlock(): void {
+    if (pendingLines === 0) return
+    // Up to the first line of the block, then clear everything below the cursor.
+    out.write('\x1B[' + pendingLines + 'A\x1B[J')
+    pendingLines = 0
+  }
+
+  function redraw(): void {
+    if (!showPending) return
+    eraseBlock()
+    const rows = [...pending.values()]
+    for (const r of rows) out.write(pendingLine(r) + '\n')
+    pendingLines = rows.length
+  }
+
   /** Every stdout write goes through here, or the cursor arithmetic that keeps
    *  the pending block pinned to the bottom drifts and the terminal corrupts. */
   function print(text: string): void {
@@ -175,19 +200,11 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
       out.write(text + '\n')
       return
     }
-    if (pendingLines > 0) out.write('\x1B[' + pendingLines + 'A')
-    out.write(text + '\x1B[K\n')
+    // The line lands where the block was, and the block is drawn again beneath it,
+    // so finished lines scroll up and the in-flight ones stay at the bottom.
+    eraseBlock()
+    out.write(text + '\n')
     redraw()
-  }
-
-  function redraw(): void {
-    if (!showPending) return
-    const rows = [...pending.values()]
-    for (const r of rows) out.write(pendingLine(r) + '\x1B[K\n')
-    // Clear whatever the previous, longer block left behind.
-    for (let i = rows.length; i < pendingLines; i++) out.write('\x1B[K\n')
-    if (rows.length < pendingLines) out.write('\x1B[' + (pendingLines - rows.length) + 'A')
-    pendingLines = rows.length
   }
 
   function requestLine(entry: LogEntry): { plain: string; painted: string } | null {
@@ -274,10 +291,9 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
       print(color ? text : text.replace(/\x1B\[[0-9;]*m/g, ''))
     },
     close() {
-      if (!showPending || pendingLines === 0) return
+      if (!showPending) return
       // Leave the terminal as we found it rather than stranding a half-drawn block.
-      out.write('\x1B[' + pendingLines + 'A\x1B[J')
-      pendingLines = 0
+      eraseBlock()
       pending.clear()
     },
   }

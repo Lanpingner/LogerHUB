@@ -76,7 +76,11 @@ const log = createLogger({
 })
 ```
 
-Lines are printed **after** redaction, so a secret cannot reach the screen either. Colour follows whether the stream is a TTY, and `NO_COLOR` always wins.
+Lines are printed **after** redaction, so a secret cannot reach the screen either.
+
+`color` defaults to whether the stream is a TTY and can be forced either way; `NO_COLOR` always wins.
+
+`pending` is different: it draws the in-flight block by moving the cursor, which only means anything on a real terminal, so it is **ignored unless stdout is a TTY** — whatever `color` says. Under PM2, systemd, Docker or any redirect, stdout is a file and the block stays off, because cursor movement written into a file does nothing and every redraw would stack another copy of the block instead of replacing it. You get plain finished lines there, which is what a log file should hold anyway.
 
 Two layouts, both fixed (they are pinned by tests, because people read them):
 
