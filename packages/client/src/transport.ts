@@ -75,6 +75,8 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; batch: BatchFrame }>()
   let state: TransportState = 'connecting'
   let ws: WebSocket | undefined
+  /** The current attempt reached hello. A close before that means we never connected. */
+  let established = false
   let ackWindow: number = HELLO_DEFAULTS.ackWindow
   let attempt = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -126,6 +128,8 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
   function connect(): void {
     if (finished) return
     setState('connecting')
+    // Reset per attempt: `onMessage` lives outside this scope, so the flag cannot.
+    established = false
     let sock: WebSocket
     try {
       // A malformed URL or a header-invalid key throws here and can never succeed later.
@@ -171,7 +175,7 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
       if (ws !== sock) return
       ws = undefined
       clearConnTimers()
-      onDrop(code, refusedStatus !== undefined && AUTH_HTTP_STATUSES.has(refusedStatus))
+      onDrop(code, refusedStatus !== undefined && AUTH_HTTP_STATUSES.has(refusedStatus), established)
     })
   }
 
@@ -195,6 +199,7 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
           ackWindow = hello.ackWindow
           if (helloTimer !== undefined) clearTimeout(helloTimer)
           helloTimer = undefined
+          established = true
           // Only a connection that stays up earns a fresh backoff; a flapping gateway keeps growing it.
           if (stableTimer !== undefined) clearTimeout(stableTimer)
           stableTimer = setTimeout(() => { stableTimer = undefined; attempt = 0 }, stableMs)
@@ -222,7 +227,7 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
     return true
   }
 
-  function onDrop(code: number, authRefused: boolean): void {
+  function onDrop(code: number, authRefused: boolean, wasEstablished: boolean): void {
     releaseAll('connection closed')
     if (finished) return
     if (authRefused) {
@@ -232,6 +237,14 @@ export function buildTransport(opts: TransportOptions, hooks: TransportHooks): T
     if (FATAL_CODES.has(code)) {
       fatal(new Error(`gateway closed the connection with ${code}: check the API key and its permissions`))
       return
+    }
+    // A close before hello means the socket opened but the gateway turned us away —
+    // the per-key connection limit is the usual cause, and it is permanent until
+    // something changes. Retrying silently would spool until the bound evicts, which
+    // looks like working logging right up to the point logs start disappearing. The
+    // reporter is rate-limited per cause, so a flapping gateway cannot flood.
+    if (!wasEstablished) {
+      report(new Error(`gateway closed the connection with ${code} before it was established; not delivering`))
     }
     setState('closed')
     scheduleReconnect()

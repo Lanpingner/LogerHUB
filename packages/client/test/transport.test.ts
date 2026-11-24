@@ -71,6 +71,39 @@ test('treats 4401 and 4403 as fatal and stops reconnecting', async () => {
   }
 })
 
+test('reports a close that happens before the connection is established', async () => {
+  // 4429 is what the gateway sends when one key already holds its maximum number of
+  // connections — the case a PM2 cluster with more instances than the cap runs into.
+  // It is not fatal (another instance may exit and free a slot), but it must not be
+  // silent either: an instance that never delivers would otherwise spool until the
+  // bound evicts, which looks like working logging right up to the point logs vanish.
+  const g = await gateway({ rejectWith: 4429 })
+  const onError = vi.fn()
+  const t = transport({ ...base, ...handlers, onError, url: g.url, backoff: { baseMs: 5, maxMs: 5 } })
+  await waitFor(() => onError.mock.calls.length > 0)
+  expect(String(onError.mock.calls[0][0].message)).toContain('before it was established')
+  // Still transient: it keeps trying, because the limit can clear.
+  const attempts = g.conns.length
+  await sleep(150)
+  expect(g.conns.length).toBeGreaterThan(attempts)
+  expect(t.state()).not.toBe('fatal')
+  await t.close()
+})
+
+test('a close after hello is not reported as unestablished', async () => {
+  const g = await gateway()
+  const onError = vi.fn()
+  const t = transport({ ...base, ...handlers, onError, url: g.url, backoff: { baseMs: 5, maxMs: 5 } })
+  await waitFor(() => t.state() === 'open')
+  g.conns[0].closeWith(1001)   // a normal restart, after a working connection
+  // No state wait: reconnect is near-instant here, so assert on what was reported
+  // over a window instead of trying to observe a transient state.
+  await waitFor(() => g.conns.length > 1)
+  await sleep(50)
+  expect(onError.mock.calls.map((c) => String(c[0].message)).join(' ')).not.toContain('before it was established')
+  await t.close()
+})
+
 test('reconnects with backoff after a transient close', async () => {
   const g = await gateway()
   const t = transport({ ...base, ...handlers, url: g.url, backoff: { baseMs: 10, maxMs: 50 } })
