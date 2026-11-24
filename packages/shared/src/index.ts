@@ -1,2 +1,2 @@
-export * from './protocol'
-export * from './canonical'
+export * from './protocol.ts'
+export * from './canonical.ts'
