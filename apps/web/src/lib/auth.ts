@@ -109,7 +109,13 @@ export async function login(email: string, password: string): Promise<{ ok: true
   jar.set(COOKIE, issueSession(email), {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    // A Secure cookie is only sent back over HTTPS, which is right for the
+    // normal deployment behind a TLS proxy. It is also a trap for anyone
+    // reaching the console over plain HTTP on a domain or IP: the browser keeps
+    // the cookie on localhost (a secure context) but drops it anywhere else, so
+    // pages load and then an action fails with no session. COOKIE_INSECURE=1 is
+    // the deliberate opt-out, and it means the cookie travels in clear text.
+    secure: process.env.COOKIE_INSECURE === '1' ? false : process.env.NODE_ENV === 'production',
     path: '/',
     maxAge: MAX_AGE_SECONDS,
   })

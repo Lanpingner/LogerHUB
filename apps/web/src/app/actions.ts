@@ -4,7 +4,8 @@ import { revalidatePath } from 'next/cache'
 import { randomUUID } from 'node:crypto'
 import { mintKey } from '@logguber/shared/keys'
 import { hashPassword, verifyPassword, MIN_PASSWORD_LENGTH } from '@logguber/shared/password'
-import { activeOperator, currentOperator, logout } from '../lib/auth'
+import { cookies } from 'next/headers'
+import { activeOperator, currentOperator, logout, readSession, SESSION_COOKIE } from '../lib/auth'
 import {
   disableKey,
   insertKey,
@@ -110,23 +111,61 @@ export async function changePasswordAction(
   current: string,
   next: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const operator = await requireSession()
-  const row = operatorByEmail(operator.email)
-  if (!row) return { ok: false, error: 'That account no longer exists.' }
-  if (!verifyPassword(current, row.password_hash)) return { ok: false, error: 'The current password is wrong.' }
-  if (next.length < MIN_PASSWORD_LENGTH) {
-    return { ok: false, error: `Use at least ${MIN_PASSWORD_LENGTH} characters.` }
+  // Everything is inside the catch deliberately. A server action that throws
+  // reaches the browser as a minified React error with the message stripped,
+  // which tells the one person who could fix it nothing at all — and this is
+  // the screen standing between a new install and its console.
+  try {
+    // Checked by hand rather than through requireSession, because the two ways
+    // this fails need different answers and a bare "unauthorised" gives neither.
+    const jar = await cookies()
+    const token = jar.get(SESSION_COOKIE)?.value
+    if (!token) {
+      return {
+        ok: false,
+        error:
+          'Your browser did not send the login cookie with this request. If you reach the console over plain ' +
+          'HTTP on a domain or IP, that cookie is marked Secure and the browser will not send it: use HTTPS, ' +
+          'or set COOKIE_INSECURE=1 in .env and restart. Otherwise your session expired — sign in again.',
+      }
+    }
+    const session = readSession(token)
+    if (!session) {
+      return {
+        ok: false,
+        error: 'Your session is no longer valid — it expired, or SESSION_SECRET changed since you signed in. Sign in again.',
+      }
+    }
+    const operator = session
+    const row = operatorByEmail(operator.email)
+    if (!row) {
+      return {
+        ok: false,
+        error:
+          'Your account could not be read. If the console was just updated, the database may be mid-migration: ' +
+          'restart the gateway (docker compose restart ingest) and reload.',
+      }
+    }
+    if (!verifyPassword(current, row.password_hash)) return { ok: false, error: 'The current password is wrong.' }
+    if (next.length < MIN_PASSWORD_LENGTH) {
+      return { ok: false, error: `Use at least ${MIN_PASSWORD_LENGTH} characters.` }
+    }
+    if (next === current) return { ok: false, error: 'That is the password you already have.' }
+    // The one value that must never survive this screen.
+    if (next.toLowerCase() === 'admin') return { ok: false, error: 'Pick something other than the default.' }
+    if (!setOperatorPassword(operator.email, hashPassword(next))) {
+      return { ok: false, error: 'The new password could not be saved. The console may not be able to write to the database.' }
+    }
+    // No revalidatePath here: it would swap the layout out from under the form
+    // while the transition that called this is still running. The client calls
+    // router.refresh() once it has the result, which is ordered and visible.
+    return { ok: true }
+  } catch (e) {
+    // Logged in full server-side, where the message is not stripped, and
+    // returned in short form so the person at the screen has something to act on.
+    console.error('changePasswordAction failed', e)
+    return { ok: false, error: 'The server could not change it: ' + (e instanceof Error ? e.message : String(e)) }
   }
-  if (next === current) return { ok: false, error: 'That is the password you already have.' }
-  // The one value that must never survive this screen.
-  if (next.toLowerCase() === 'admin') return { ok: false, error: 'Pick something other than the default.' }
-  if (!setOperatorPassword(operator.email, hashPassword(next))) {
-    return { ok: false, error: 'Could not save the new password.' }
-  }
-  // No revalidatePath here: it would swap the layout out from under the form
-  // while the transition that called this is still running. The client calls
-  // router.refresh() once it has the result, which is ordered and visible.
-  return { ok: true }
 }
 
 const KEY_NAME = /^[\w .-]{1,64}$/

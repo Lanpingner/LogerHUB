@@ -183,6 +183,27 @@ when your own nginx is in front — it is off by default.
 Your services connect to `wss://<your domain>/v1/stream`. The console is on the
 same domain, so there is one certificate and no CORS.
 
+### If a login works but actions fail
+
+Symptom: pages load, then changing the password or creating a key fails, and
+`docker compose logs web` shows `Error: unauthorised`.
+
+The session cookie is marked `Secure`, so the browser only sends it back over
+HTTPS. Browsers make an exception for `localhost`, which is why this does not
+show up in local testing — but on a domain or an IP over plain HTTP the page
+renders and the action then arrives with no cookie.
+
+Either reach the console over HTTPS (what `deploy/nginx.conf` is for), or, if
+you knowingly run it without TLS on a trusted network:
+
+```bash
+echo 'COOKIE_INSECURE=1' >> .env
+docker compose up -d --force-recreate web
+```
+
+That sends the session cookie in clear text, so it is only reasonable where
+nothing untrusted can see the traffic.
+
 ### If the build stalls
 
 The symptom is `pnpm install` sitting at `Progress: resolved 1, reused 0,
