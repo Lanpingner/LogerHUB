@@ -3,3 +3,6 @@ dist
 .superpowers/
 apps/ingest/data/
 apps/web/.next/
+
+# Packed tarballs from `pnpm pack`
+*.tgz

@@ -1,16 +1,14 @@
 # @leviathan.systems/logerhub-client
 
-A logger for Express services that streams to a Logguber gateway over WebSocket. When the gateway is unreachable it spools to a local SQLite file, so an outage costs delay rather than lost logs.
+One logger for Express and WebSocket services: it prints to your terminal and streams to a LogerHUB gateway in the same call. When the gateway is unreachable it spools to a local SQLite file, so an outage costs delay rather than lost logs.
 
 ## Install
 
-The package is private and consumed as a workspace dependency:
-
-```json
-{ "dependencies": { "@leviathan.systems/logerhub-client": "workspace:*" } }
+```bash
+npm install @leviathan.systems/logerhub-client
 ```
 
-Requires **Node 24 or newer** (the spool uses the built-in `node:sqlite`). Both ESM (`import`) and CommonJS (`require`) are supported.
+Requires **Node 24 or newer** (the spool uses the built-in `node:sqlite`). Both ESM (`import`) and CommonJS (`require`) are supported, with TypeScript declarations for each. The only runtime dependency is `ws`.
 
 ## Quick start
 
