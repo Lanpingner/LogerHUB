@@ -278,6 +278,61 @@ test('a finished response is logged once, and the close that follows does not du
   expect(await entries()).toHaveLength(1)
 })
 
+test('splits duration into server and transit', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/slow').expect(200)
+  const http = (await entries())[0].meta.http
+  expect(http.server_ms).toBeGreaterThanOrEqual(15)
+  expect(http.transit_ms).toBeGreaterThanOrEqual(0)
+  expect(http.server_ms + http.transit_ms).toBeCloseTo(http.duration_ms, 0)
+})
+
+test('a request aborted before any write has no split', async () => {
+  const { app, entries, state } = await appWith({})
+  const req = request(app).get('/hang').end(() => {})
+  await waitFor(() => state.hangHits > 0)
+  req.abort()
+  let e = await entries()
+  for (let i = 0; e.length === 0 && i < 100; i++) {
+    await sleep(20)
+    e = await entries()
+  }
+  const http = e[0].meta.http
+  expect(http.aborted).toBe(true)
+  expect(http.server_ms).toBeUndefined()
+  expect(http.transit_ms).toBeUndefined()
+  expect(http.duration_ms).toBeGreaterThanOrEqual(0)
+})
+
+test('a request through the error handler still has a split', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/throws').expect(500)
+  const http = (await entries())[0].meta.http
+  expect(http.server_ms).toBeGreaterThanOrEqual(0)
+  expect(http.transit_ms).toBeGreaterThanOrEqual(0)
+})
+
+test('a double end() does not move the mark or go negative', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/double-end').expect(200)
+  const http = (await entries())[0].meta.http
+  expect(http.transit_ms).toBeGreaterThanOrEqual(0)
+  expect(http.server_ms).toBeGreaterThanOrEqual(0)
+})
+
+test('an explicit writeHead with no body still marks the first byte', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/head-only').expect(204)
+  const http = (await entries())[0].meta.http
+  expect(http.server_ms).toBeGreaterThanOrEqual(0)
+})
+
+test('an app cannot overwrite the measurement via resolveMeta', async () => {
+  const { app, entries } = await appWith({ resolveMeta: () => ({ server_ms: 999999 }) })
+  await request(app).get('/users/1').expect(200)
+  expect((await entries())[0].meta.http.server_ms).toBeLessThan(999999)
+})
+
 test('an unparsed request emits no req.body key at all, on either Express major', async () => {
   const { app, entries } = await appWith({ bodies: 'always' })
   app.post('/noparse', (_req, res) => void res.status(500).end())

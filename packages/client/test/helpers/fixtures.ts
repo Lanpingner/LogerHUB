@@ -88,6 +88,11 @@ export async function appWith(
   app.use(log.expressMiddleware(opts))
   app.use(express.json())
   app.get('/users/:id', (_req, res) => void res.json({ id: 1, token: 'sekret' }))
+  app.get('/slow', (_req, res) => void setTimeout(() => res.json({ ok: true }), 25))
+  app.get('/head-only', (_req, res) => {
+    res.writeHead(204)
+    res.end()
+  })
   app.get('/health', (_req, res) => void res.send('ok'))
   app.get('/boom', (_req, res) => void res.status(500).json({ error: 'boom' }))
   app.get('/throws', () => {

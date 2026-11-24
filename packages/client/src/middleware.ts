@@ -117,6 +117,8 @@ export function createExpressMiddleware(
     const start = process.hrtime.bigint()
     const startedAt = Date.now()
     const sampled = mode === 'sample' && Math.random() < rate
+    // Independent of body capture: `bodies: 'never'` must not cost the timing split.
+    const firstByte = markFirstByte(res)
     const body = mode === 'never' ? undefined : captureResponse(res, mode, sampled, maxBytes)
     let emitted = false
 
@@ -153,6 +155,7 @@ export function createExpressMiddleware(
     const emit = (finished: boolean): void => {
       if (emitted) return
       emitted = true
+      const finishAt = process.hrtime.bigint()
       if (opts.pending === true && view !== undefined) {
         try {
           view.pendingRemove(requestId)
@@ -168,10 +171,18 @@ export function createExpressMiddleware(
           route,
           path: (req.originalUrl ?? req.url ?? '').split('?')[0],
           status,
-          duration_ms: Number(process.hrtime.bigint() - start) / 1e6,
+          duration_ms: Number(finishAt - start) / 1e6,
           request_id: requestId,
           req: { headers: redactHeaders(req.headers, opts.headerAllowlist) },
           res: {},
+        }
+        // Scalars on `http`, not entries of `http.timings`: that map is rendered as one flat
+        // waterfall normalised by its sum, and server_ms contains any phase reported inside it.
+        // Omitted together when no byte went out; the `aborted` flag already says why.
+        const firstByteAt = firstByte.at()
+        if (firstByteAt !== undefined) {
+          http.server_ms = Number(firstByteAt - start) / 1e6
+          http.transit_ms = Number(finishAt - firstByteAt) / 1e6
         }
         if (ip !== undefined) http.ip = ip
         if (!finished) http.aborted = true
@@ -245,6 +256,31 @@ export function createExpressMiddleware(
       return undefined // costs the dimensions, not the entry
     }
   }
+}
+
+/**
+ * Records when the response first reaches the wire: the earliest of `writeHead`, `write` and
+ * `end`. `writeHead` counts because a headers-only response (204, HEAD) may never write a body.
+ * Set once and never overwritten, so a second `end()` or an error handler that answers after the
+ * route began cannot move the mark later and shrink the server time.
+ */
+function markFirstByte(res: ServerResponse): { at(): bigint | undefined } {
+  let firstByteAt: bigint | undefined
+  const mark = (): void => {
+    try {
+      firstByteAt ??= process.hrtime.bigint()
+    } catch {
+      // Timing is best effort; the response must go out regardless.
+    }
+  }
+  for (const name of ['writeHead', 'write', 'end'] as const) {
+    const original = res[name] as (...a: unknown[]) => unknown
+    res[name] = function (this: ServerResponse, ...args: unknown[]) {
+      mark()
+      return original.apply(this, args)
+    } as never
+  }
+  return { at: () => firstByteAt }
 }
 
 interface ResponseCapture {
