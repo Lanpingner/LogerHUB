@@ -1,5 +1,10 @@
 packages:
   - 'packages/*'
   - 'apps/*'
+
+# npm cannot parse `workspace:*`, and the Docker images install with npm, so the
+# manifests use a plain `*` for workspace siblings. This makes pnpm resolve that
+# to the local package instead of trying to fetch it from the registry.
+linkWorkspacePackages: true
 allowBuilds:
   esbuild: true
