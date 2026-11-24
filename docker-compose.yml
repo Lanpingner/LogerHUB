@@ -11,6 +11,9 @@ services:
     restart: unless-stopped
 
   ingest:
+    # Named so `docker compose push` / `pull` work: the workstation builds and
+    # pushes, the server pulls. See the Makefile.
+    image: ${REGISTRY:-registry.leviathan.systems}/${PROJECT:-logerhub}/logerhub-ingest:${TAG:-latest}
     build:
       context: .
       dockerfile: deploy/ingest.Dockerfile
@@ -33,6 +36,7 @@ services:
     restart: unless-stopped
 
   web:
+    image: ${REGISTRY:-registry.leviathan.systems}/${PROJECT:-logerhub}/logerhub-web:${TAG:-latest}
     build:
       context: .
       dockerfile: deploy/web.Dockerfile

@@ -46,6 +46,25 @@ INGEST_BIND=127.0.0.1:8080               # change if the port is taken
 WEB_BIND=127.0.0.1:3000
 ```
 
+Then build the images **on a workstation** and let the server pull them:
+
+```bash
+# on your workstation
+make push                 # build both images and push to the registry
+
+# on the server
+make deploy               # pull, restart, and check /health and /login
+```
+
+The server never builds, for two reasons: `next build` needs about 2GB of
+memory, and pulling a built image beats installing hundreds of packages over
+whatever link the server has. `make help` lists the rest; `TAG=release make push`
+tags a release. The registry and project default to
+`registry.leviathan.systems/logerhub` and are overridable:
+`make push REGISTRY=… PROJECT=…`.
+
+If you would rather build on the server anyway:
+
 ```bash
 docker compose up -d --build
 ```
@@ -177,8 +196,20 @@ and the Loki write.
 ### Updating
 
 ```bash
-git pull && docker compose up -d --build
+# on your workstation
+git pull && make push
+
+# on the server
+git pull && make deploy
 ```
+
+The server still needs `git pull`: the compose file, Loki's config and the nginx
+config are read from the checkout, not from the images.
+
+Building on the server instead is `git pull && docker compose up -d --build`,
+which needs ~2GB free for `next build` — it is killed by the OOM killer below
+about 1.5GB, and the symptom is `failed to execute bake: signal: killed` right
+after "Creating an optimized production build".
 
 The SQLite store and Loki's chunks live in named volumes, so they survive a
 rebuild. Back up by copying the `store` volume — it is one file.
