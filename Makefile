@@ -44,8 +44,11 @@ release:
 
 # --- on the server ---------------------------------------------------------
 
+# Every service, not just the two we build: Loki comes from Docker Hub, and on a
+# fresh server `up` would otherwise fetch it mid-start, which looks like a hang.
+# Pulling it here keeps all the downloading in the step named "pull".
 pull:
-	docker compose pull ingest web
+	docker compose pull
 
 # `--no-build` is the point: the server has the images and must never try to
 # build them. Loki comes from Docker Hub as usual.
