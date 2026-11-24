@@ -1,25 +1,13 @@
-import { createHmac, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+// Kept in its own module: it is pure crypto, so it stays importable outside the
+// Next runtime (the seeding and verification scripts check it directly).
+import { verifyPassword } from './password'
 import { cookies } from 'next/headers'
 import { operatorByEmail } from './store'
 
 const SECRET = process.env.SESSION_SECRET ?? ''
 const COOKIE = 'logguber_session'
 const MAX_AGE_SECONDS = 60 * 60 * 12
-
-/** `scrypt$<salt>$<hash>` — written by the gateway's seed CLI. */
-export function verifyPassword(password: string, stored: string): boolean {
-  const parts = stored.split('$')
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false
-  const [, salt, hash] = parts
-  let expected: Buffer
-  try {
-    expected = Buffer.from(hash, 'hex')
-  } catch {
-    return false
-  }
-  const actual = scryptSync(password, salt, expected.length)
-  return actual.length === expected.length && timingSafeEqual(actual, expected)
-}
 
 function sign(payload: string): string {
   return createHmac('sha256', SECRET).update(payload).digest('base64url')
@@ -80,3 +68,5 @@ export async function logout(): Promise<void> {
 }
 
 export const SESSION_COOKIE = COOKIE
+
+export { verifyPassword }

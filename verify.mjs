@@ -2,7 +2,8 @@
 // real client, then fetches every console page over HTTP and checks what rendered.
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { createHmac } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
+import { createHmac, scryptSync } from 'node:crypto'
 import { rmSync, mkdirSync } from 'node:fs'
 import { createLogger } from './packages/client/dist/index.mjs'
 
@@ -75,18 +76,22 @@ await new Promise((r) => loki.listen(LOKI_PORT, r))
 console.log('fake loki on ' + LOKI_PORT)
 
 // --- seed an operator and a key through the real CLI ----------------------
-async function seed(args) {
+async function seed(args, stdinText) {
   const c = spawn('node', ['--experimental-strip-types', 'src/seed.ts', ...args], {
     cwd: 'apps/ingest',
     env: { ...process.env, LOGGUBER_DB: '../../' + DB },
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: [stdinText == null ? 'ignore' : 'pipe', 'pipe', 'inherit'],
   })
   let out = ''
   c.stdout.on('data', (b) => (out += b))
-  await new Promise((r) => c.on('exit', r))
+  if (stdinText != null) c.stdin.end(stdinText + '\n')
+  const code = await new Promise((r) => c.on('exit', r))
+  if (code !== 0) throw new Error('seed ' + args[0] + ' failed with code ' + code)
   return out
 }
-await seed(['operator', EMAIL, PASSWORD])
+// The CLI refuses a password in argv, so it goes down stdin the way an operator
+// would pipe it.
+await seed(['operator', EMAIL], PASSWORD)
 const keyOut = await seed(['key', 'public-api', 'public-api,office-api', 'prod'])
 const apiKey = /lgb_[\w-]+_[\w-]+/.exec(keyOut)?.[0]
 if (!apiKey) throw new Error('no api key minted')
@@ -136,8 +141,32 @@ function sessionCookie(email) {
   return 'logguber_session=' + payload + '.' + createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url')
 }
 const cookie = sessionCookie(EMAIL)
-
 const checks = []
+
+// The forged cookie above skips the password check. The login page posts a
+// server action, which a plain fetch cannot drive, so verify the part that
+// actually changed: the console must accept the hash the seed CLI writes. A
+// mismatch there locks the operator out of their own console.
+{
+  const { verifyPassword } = await import('./apps/web/src/lib/password.ts')
+  const row = new DatabaseSync(DB, { readOnly: true })
+    .prepare('SELECT password_hash FROM operators WHERE email = ?')
+    .get(EMAIL)
+  const hash = String(row?.password_hash ?? '')
+  const shape = /^scrypt\$\d+:\d+:\d+\$[0-9a-f]+\$[0-9a-f]+$/.test(hash)
+  const accepts = hash ? verifyPassword(PASSWORD, hash) : false
+  const rejects = hash ? !verifyPassword(PASSWORD + 'x', hash) : false
+  checks.push({ path: 'seeded hash records its scrypt cost', status: 200, ok: shape, missing: shape ? [] : ['got ' + hash.slice(0, 24)] })
+  checks.push({ path: 'console accepts the seeded password', status: 200, ok: accepts, missing: accepts ? [] : ['verifyPassword said no'] })
+  checks.push({ path: 'console rejects a wrong password', status: 200, ok: rejects, missing: rejects ? [] : ['verifyPassword said yes'] })
+  // The older two-part shape must keep working, or raising the cost would lock
+  // out every operator created before the change.
+  const legacySalt = 'abc123'
+  const legacy = 'scrypt$' + legacySalt + '$' + scryptSync(PASSWORD, legacySalt, 64).toString('hex')
+  const legacyOk = verifyPassword(PASSWORD, legacy) && !verifyPassword('nope', legacy)
+  checks.push({ path: 'console still accepts a pre-change hash', status: 200, ok: legacyOk, missing: legacyOk ? [] : ['legacy hash rejected'] })
+}
+
 async function page(path, mustContain) {
   const res = await fetch('http://127.0.0.1:' + WEB_PORT + path, { headers: { cookie }, redirect: 'manual' })
   const html = await res.text()

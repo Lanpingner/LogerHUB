@@ -12,7 +12,7 @@ const dist = (f: string): string => path.join(root, 'packages/client/dist', f)
 describe('built package', () => {
   beforeAll(() => {
     fs.rmSync(path.join(root, 'packages/client/dist'), { recursive: true, force: true })
-    execSync('pnpm --filter @logguber/client build', { stdio: 'inherit', cwd: root })
+    execSync('pnpm --filter @leviathan.systems/logerhub-client build', { stdio: 'inherit', cwd: root })
   }, 120_000)
 
   test('is importable both ways and exposes createLogger', async () => {

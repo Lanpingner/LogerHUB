@@ -30,6 +30,31 @@ schema_config:
 limits_config:
   allow_structured_metadata: true
 
+  # Ingestion ceilings. The gateway is the only writer and already caps batch
+  # size, but a compromised key must not be able to fill the disk: Loki is the
+  # last line, and these are the limits it enforces itself.
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  per_stream_rate_limit: 4MB
+  per_stream_rate_limit_burst: 16MB
+
+  # Stream count is the resource that actually hurts when it runs away, because
+  # every stream is its own chunk. Our labels are service/env/level only, so a
+  # few dozen is the honest number; 500 leaves room without leaving the door open.
+  max_global_streams_per_user: 500
+  max_label_names_per_series: 15
+  max_label_name_length: 64
+  max_label_value_length: 256
+
+  # The gateway clamps timestamps, so anything arriving outside this window is a
+  # bug or an attack rather than a slow client.
+  creation_grace_period: 10m
+
+  # Query-side caps, so one careless console query cannot take Loki down.
+  max_entries_limit_per_query: 10000
+  max_query_length: 721h
+  max_query_series: 1000
+
   # Must stay in step with the client spool's maxAge (7 days). A longer outage
   # than this replays into rejection, which would silently waste the spool.
   reject_old_samples: true

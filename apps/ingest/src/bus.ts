@@ -26,6 +26,9 @@ function matches(e: LiveEntry, f: Filter): boolean {
 }
 
 const RING = 1000
+/** The ring holds entries until 1000 newer ones arrive, so without a byte
+ *  budget a burst of large entries stays resident long after the sender left. */
+const RING_BYTES = 8 * 1024 * 1024
 
 /** In-process fan-out so live tail does not wait on storage, plus a ring buffer
  *  so opening the tail shows context instead of an empty screen.
@@ -33,13 +36,26 @@ const RING = 1000
  *  allowed to back up ingest, because the durable copy is going to Loki anyway. */
 export function createBus() {
   const ring: LiveEntry[] = []
+  let ringBytes = 0
   const subs = new Set<{ filter: Filter; send: (e: LiveEntry) => void }>()
+
+  const sizeOf = (e: LiveEntry): number => {
+    try {
+      return JSON.stringify(e).length
+    } catch {
+      return 1024
+    }
+  }
 
   return {
     publish(entries: LiveEntry[]) {
       for (const e of entries) {
         ring.push(e)
-        if (ring.length > RING) ring.shift()
+        ringBytes += sizeOf(e)
+        while (ring.length > RING || (ringBytes > RING_BYTES && ring.length > 1)) {
+          const dropped = ring.shift()
+          if (dropped) ringBytes -= sizeOf(dropped)
+        }
         for (const s of subs) {
           if (!matches(e, s.filter)) continue
           try {

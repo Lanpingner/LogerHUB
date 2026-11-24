@@ -8,7 +8,7 @@ tails them live, and shows how much each client company uses your APIs.
 
 ```
 Express app ──┐
-Express app ──┼── @logguber/client ──WSS (acked stream)──> ingest gateway
+Express app ──┼── @leviathan.systems/logerhub-client ──WSS (acked stream)──> ingest gateway
 Express app ──┘      └─ SQLite spool (while unreachable)      │        │
                                                               │        └─> SQLite
                                                               ▼             (keys, options,
@@ -159,7 +159,7 @@ node traffic.mjs                       # optional: simulated traffic
 ### In your Express service
 
 ```js
-import { createLogger } from '@logguber/client'
+import { createLogger } from '@leviathan.systems/logerhub-client'
 
 const log = createLogger({
   url: process.env.LOGGUBER_URL,   // wss://logs.example.com/v1/stream

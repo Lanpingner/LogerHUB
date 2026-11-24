@@ -1,8 +1,8 @@
 {
-  "name": "@logguber/client",
-  "version": "0.0.0",
+  "name": "@leviathan.systems/logerhub-client",
+  "version": "0.1.0",
   "private": true,
-  "description": "Streams logs from Express services to a Logguber gateway, spooling to SQLite while it is unreachable.",
+  "description": "Streams logs from Express services to a LogerHUB gateway, spooling to SQLite while it is unreachable.",
   "engines": {
     "node": ">=24"
   },

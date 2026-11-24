@@ -1,4 +1,4 @@
-// Setup:  pnpm --filter @logguber/client build   (from the repo root, once)
+// Setup:  pnpm --filter @leviathan.systems/logerhub-client build   (from the repo root, once)
 //         npm install                             (in this directory; the client is a file: dependency)
 //         npm start
 //
@@ -8,7 +8,7 @@
 // and the batches are kept until a gateway accepts them. Point LOGGUBER_URL / LOGGUBER_KEY at a
 // real gateway once one exists.
 import express from 'express'
-import { createLogger } from '@logguber/client'
+import { createLogger } from '@leviathan.systems/logerhub-client'
 
 const log = createLogger({
   url: process.env.LOGGUBER_URL ?? 'ws://localhost:8080/ingest',

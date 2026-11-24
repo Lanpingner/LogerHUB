@@ -1,4 +1,4 @@
-# @logguber/client
+# @leviathan.systems/logerhub-client
 
 A logger for Express services that streams to a Logguber gateway over WebSocket. When the gateway is unreachable it spools to a local SQLite file, so an outage costs delay rather than lost logs.
 
@@ -7,7 +7,7 @@ A logger for Express services that streams to a Logguber gateway over WebSocket.
 The package is private and consumed as a workspace dependency:
 
 ```json
-{ "dependencies": { "@logguber/client": "workspace:*" } }
+{ "dependencies": { "@leviathan.systems/logerhub-client": "workspace:*" } }
 ```
 
 Requires **Node 24 or newer** (the spool uses the built-in `node:sqlite`). Both ESM (`import`) and CommonJS (`require`) are supported.
@@ -16,7 +16,7 @@ Requires **Node 24 or newer** (the spool uses the built-in `node:sqlite`). Both 
 
 ```js
 import express from 'express'
-import { createLogger } from '@logguber/client'
+import { createLogger } from '@leviathan.systems/logerhub-client'
 
 const log = createLogger({
   url: process.env.LOGGUBER_URL,     // e.g. wss://logs.example.com/ingest

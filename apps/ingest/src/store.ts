@@ -64,9 +64,14 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
 );
 CREATE INDEX IF NOT EXISTS usage_depth_hour ON usage_rollup(depth, hour);
 CREATE TABLE IF NOT EXISTS ingest_batches (
-  batch_id TEXT PRIMARY KEY,
   key_id TEXT NOT NULL,
-  received_at INTEGER NOT NULL
+  batch_id TEXT NOT NULL,
+  received_at INTEGER NOT NULL,
+  -- NULL means claimed but not yet stored. A retry of an incomplete claim is a
+  -- real retry, not a duplicate: treating it as a duplicate is how a transient
+  -- Loki failure silently deleted the batch.
+  completed_at INTEGER,
+  PRIMARY KEY (key_id, batch_id)
 );
 CREATE INDEX IF NOT EXISTS batches_received ON ingest_batches(received_at);
 CREATE TABLE IF NOT EXISTS dimension_labels (
@@ -92,6 +97,32 @@ CREATE TABLE IF NOT EXISTS ingest_errors (
 CREATE INDEX IF NOT EXISTS errors_at ON ingest_errors(at);
 `
 
+export const OVERFLOW_VALUE = '__overflow__'
+
+/** Distinct dimension combinations kept per hour, per hierarchy depth. Above
+ *  this, combinations fold into a single overflow row. Chosen so a year of a
+ *  busy month still fits comfortably, while a client inventing a dimension value
+ *  per request cannot grow the table without bound. */
+export const MAX_ROLLUP_ROWS_PER_BUCKET = 2000
+
+/** Replaces every dimension but the service with a sentinel. The service name is
+ *  bounded by the key's scope, so keeping it tells the operator where the
+ *  cardinality came from. */
+export function overflowDims(dims: string): string {
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(dims) as Record<string, unknown>
+  } catch {
+    return dims
+  }
+  if (!parsed || typeof parsed !== 'object') return dims
+  const out: Record<string, string> = Object.create(null)
+  for (const k of Object.keys(parsed).sort()) {
+    out[k] = k === 'service' ? String(parsed[k] ?? 'unknown') : OVERFLOW_VALUE
+  }
+  return JSON.stringify(out)
+}
+
 const DEFAULT_SETTINGS: Settings = {
   levels: [
     { key: 'service', label: 'Service' },
@@ -111,6 +142,19 @@ export function openStore(file: string) {
   db.exec('PRAGMA foreign_keys = ON')
   db.exec(SCHEMA)
 
+  // The dedupe ledger gained `completed_at` and a per-key primary key. It holds
+  // at most 24 hours of ids and nothing reads it for history, so rebuilding is
+  // safe and simpler than an in-place migration.
+  try {
+    const cols = db.prepare('PRAGMA table_info(ingest_batches)').all() as { name: string }[]
+    if (cols.length && !cols.some((c) => c.name === 'completed_at')) {
+      db.exec('DROP TABLE ingest_batches')
+      db.exec(SCHEMA)
+    }
+  } catch {
+    // A store we cannot inspect is one we should not silently rewrite.
+  }
+
   const st = {
     keyByKeyId: db.prepare('SELECT * FROM api_keys WHERE key_id = ?'),
     touchKey: db.prepare('UPDATE api_keys SET last_used_at = ?, last_used_ip = ? WHERE id = ?'),
@@ -118,7 +162,15 @@ export function openStore(file: string) {
     putSettings: db.prepare(
       'INSERT INTO settings (id, json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json',
     ),
-    seenBatch: db.prepare('INSERT INTO ingest_batches (batch_id, key_id, received_at) VALUES (?, ?, ?)'),
+    claimBatch: db.prepare('INSERT INTO ingest_batches (key_id, batch_id, received_at) VALUES (?, ?, ?)'),
+    batchState: db.prepare('SELECT completed_at FROM ingest_batches WHERE key_id = ? AND batch_id = ?'),
+    completeBatch: db.prepare('UPDATE ingest_batches SET completed_at = ? WHERE key_id = ? AND batch_id = ?'),
+    releaseBatch: db.prepare('DELETE FROM ingest_batches WHERE key_id = ? AND batch_id = ? AND completed_at IS NULL'),
+    pruneStaleClaims: db.prepare('DELETE FROM ingest_batches WHERE completed_at IS NULL AND received_at < ?'),
+    pruneErrorsByAge: db.prepare('DELETE FROM ingest_errors WHERE at < ?'),
+    pruneErrorsByCount: db.prepare(
+      'DELETE FROM ingest_errors WHERE id NOT IN (SELECT id FROM ingest_errors ORDER BY at DESC LIMIT ?)',
+    ),
     rollup: db.prepare(`
       INSERT INTO usage_rollup (hour, depth, dims, lines, bytes, requests, errors)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -128,6 +180,8 @@ export function openStore(file: string) {
         requests = requests + excluded.requests,
         errors = errors + excluded.errors`),
     logError: db.prepare('INSERT INTO ingest_errors (at, key_id, reason, detail) VALUES (?, ?, ?, ?)'),
+    countRollup: db.prepare('SELECT COUNT(*) AS n FROM usage_rollup WHERE hour = ? AND depth = ?'),
+    hasRollup: db.prepare('SELECT 1 FROM usage_rollup WHERE hour = ? AND depth = ? AND dims = ? LIMIT 1'),
     pruneBatches: db.prepare('DELETE FROM ingest_batches WHERE received_at < ?'),
     allKeys: db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC'),
     insertKey: db.prepare(`INSERT INTO api_keys
@@ -144,6 +198,8 @@ export function openStore(file: string) {
     ),
     insertOperator: db.prepare('INSERT INTO operators (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'),
   }
+
+  let rolledUpOverflow = 0
 
   function settings(): Settings {
     const row = st.settings.get() as { json: string } | undefined
@@ -189,31 +245,90 @@ export function openStore(file: string) {
     touchKey(id: string, ip: string) {
       st.touchKey.run(Date.now(), ip, id)
     },
-    /** Returns false when this batch id was already stored. */
-    claimBatch(batchId: string, keyId: string): boolean {
+    /**
+     * Claims a batch id for this key. Returns:
+     *   'new'       — proceed and store it
+     *   'retry'     — a previous attempt claimed it but never completed, so
+     *                 storing it again is correct, not a duplicate
+     *   'duplicate' — already stored; ack without doing the work again
+     *
+     * The dedupe namespace is per key, so one tenant cannot block another
+     * tenant's id by claiming it first.
+     */
+    claimBatch(batchId: string, keyId: string): 'new' | 'retry' | 'duplicate' {
       try {
-        st.seenBatch.run(batchId, keyId, Date.now())
-        return true
+        st.claimBatch.run(keyId, batchId, Date.now())
+        return 'new'
       } catch {
-        return false
+        const row = st.batchState.get(keyId, batchId) as { completed_at: number | null } | undefined
+        return row && row.completed_at != null ? 'duplicate' : 'retry'
       }
+    },
+    /** Marks a claim as stored. Only after this does a retry become a duplicate. */
+    completeBatch(batchId: string, keyId: string): void {
+      try { st.completeBatch.run(Date.now(), keyId, batchId) } catch {}
+    },
+    /** Gives the id back after a failure, so the client's retry is handled for real. */
+    releaseBatch(batchId: string, keyId: string): void {
+      try { st.releaseBatch.run(keyId, batchId) } catch {}
     },
     rollup(rows: { hour: number; depth: number; dims: string; lines: number; bytes: number; requests: number; errors: number }[]) {
       const tx = db.prepare('BEGIN IMMEDIATE')
       tx.run()
       try {
-        for (const r of rows) st.rollup.run(r.hour, r.depth, r.dims, r.lines, r.bytes, r.requests, r.errors)
+        // Counted once per (hour, depth) and then kept in step by hand: a COUNT
+        // per row would be a query per log line at write time.
+        const counts = new Map<string, number>()
+        let folded = 0
+        for (const r of rows) {
+          const bucket = r.hour + '\u0000' + r.depth
+          let n = counts.get(bucket)
+          if (n === undefined) {
+            n = Number((st.countRollup.get(r.hour, r.depth) as { n: number } | undefined)?.n ?? 0)
+            counts.set(bucket, n)
+          }
+          let dims = r.dims
+          if (n >= MAX_ROLLUP_ROWS_PER_BUCKET && !st.hasRollup.get(r.hour, r.depth, r.dims)) {
+            // The ceiling exists because dimension values come from the client:
+            // a caller sending a unique company id per request would otherwise
+            // write a row per request. Folding keeps the totals honest — the
+            // traffic is still counted — and loses only the breakdown.
+            dims = overflowDims(r.dims)
+            folded++
+          } else if (!st.hasRollup.get(r.hour, r.depth, r.dims)) {
+            counts.set(bucket, n + 1)
+          }
+          st.rollup.run(r.hour, r.depth, dims, r.lines, r.bytes, r.requests, r.errors)
+        }
         db.prepare('COMMIT').run()
+        if (folded > 0) rolledUpOverflow = folded
       } catch (e) {
         try { db.prepare('ROLLBACK').run() } catch {}
         throw e
       }
     },
+    /** How many rows the last rollup folded into the overflow bucket, for the
+     *  caller to record once rather than per row. */
+    takeOverflowCount(): number {
+      const n = rolledUpOverflow
+      rolledUpOverflow = 0
+      return n
+    },
+    /** `detail` is attacker-influenced, so it is truncated before it is stored. */
     logError(keyId: string | null, reason: string, detail?: string) {
-      try { st.logError.run(Date.now(), keyId, reason, detail ?? null) } catch {}
+      const trimmed = detail == null ? null : String(detail).slice(0, 512)
+      try { st.logError.run(Date.now(), keyId, String(reason).slice(0, 64), trimmed) } catch {}
     },
     prune() {
-      try { st.pruneBatches.run(Date.now() - 24 * 60 * 60 * 1000) } catch {}
+      const now = Date.now()
+      try { st.pruneBatches.run(now - 24 * 60 * 60 * 1000) } catch {}
+      // A claim that never completed is dead after an hour; the client has long
+      // since retried or spooled it.
+      try { st.pruneStaleClaims.run(now - 60 * 60 * 1000) } catch {}
+      // Every rejected batch writes an error row, so this table is as
+      // attacker-driven as the traffic. Bound it by age and by row count.
+      try { st.pruneErrorsByAge.run(now - 14 * 24 * 60 * 60 * 1000) } catch {}
+      try { st.pruneErrorsByCount.run(5000) } catch {}
     },
     listKeys: () => (st.allKeys.all() as Record<string, unknown>[]).map(parseKey),
     insertKey: (k: Omit<ApiKey, 'disabled_at'>) =>

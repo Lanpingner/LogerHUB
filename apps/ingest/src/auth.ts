@@ -84,11 +84,36 @@ export function ipAllowed(ip: string, keyList: string[], globalList: string[]): 
   return list.some((c) => ipMatches(ip, c))
 }
 
-/** Socket address resolved through a configured number of trusted proxy hops. */
-export function clientIp(socketIp: string, xff: string | undefined, hops: number): string {
+/**
+ * Resolves the caller's address from `X-Forwarded-For`.
+ *
+ * Prefer `trustedCidrs`: walk the chain right to left and take the first address
+ * that is not a proxy we trust. That is correct under any number of hops and
+ * fails closed when the socket peer is not a trusted proxy — someone reaching
+ * the gateway directly cannot name their own address.
+ *
+ * `hops` is the older, brittle form, kept for compatibility. It trusts whatever
+ * sits at a fixed position, so a wrong count — or a request that bypasses the
+ * proxy entirely — lets the caller choose the address the allowlist checks.
+ */
+export function clientIp(
+  socketIp: string,
+  xff: string | undefined,
+  hops: number,
+  trustedCidrs: string[] = [],
+): string {
+  if (trustedCidrs.length) {
+    // The socket peer itself must be a trusted proxy before any header is believed.
+    if (!trustedCidrs.some((c) => ipMatches(socketIp, c))) return socketIp
+    const chain = (xff ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    for (let i = chain.length - 1; i >= 0; i--) {
+      if (!trustedCidrs.some((c) => ipMatches(chain[i], c))) return chain[i]
+    }
+    return socketIp
+  }
+
   if (hops <= 0 || !xff) return socketIp
   const chain = xff.split(',').map((s) => s.trim()).filter(Boolean)
-  // Take the hop-th address from the right: the nearest one we still trust.
   const idx = chain.length - hops
   return idx >= 0 && chain[idx] ? chain[idx] : socketIp
 }

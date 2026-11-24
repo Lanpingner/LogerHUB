@@ -35,7 +35,7 @@ interface Problem {
 }
 
 const SNIPPETS = {
-  'Node.js / Express': `import { createLogger } from '@logguber/client'
+  'Node.js / Express': `import { createLogger } from '@leviathan.systems/logerhub-client'
 
 const log = createLogger({
   url: process.env.LOGGUBER_URL,      // wss://logs.example.com/v1/stream
