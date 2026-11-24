@@ -1,7 +1,17 @@
 # The same .env docker compose reads, so `make verify` checks the ports the
-# stack is actually bound to rather than the defaults.
--include .env
-export
+# stack is actually bound to rather than the defaults. Only the two bind
+# addresses are taken from it, and nothing from it is exported: .env also holds
+# CONSOLE_SECRET and SESSION_SECRET, and a bare `export` would hand those to
+# every command make runs, including ones that have no business seeing them.
+# Compose reads .env itself, so it loses nothing.
+INGEST_BIND := $(strip $(shell sed -n 's/^INGEST_BIND=//p' .env 2>/dev/null | tail -1))
+WEB_BIND    := $(strip $(shell sed -n 's/^WEB_BIND=//p' .env 2>/dev/null | tail -1))
+
+# host:port only. A value from a file is not a command, and interpolating one
+# unchecked into a shell recipe is how a stray character becomes an executed one.
+VALID_BIND  := ^[A-Za-z0-9._-]+:[0-9]+$$
+INGEST_ADDR := $(shell printf %s '$(INGEST_BIND)' | grep -Eq '$(VALID_BIND)' && printf %s '$(INGEST_BIND)' || printf 127.0.0.1:8080)
+WEB_ADDR    := $(shell printf %s '$(WEB_BIND)' | grep -Eq '$(VALID_BIND)' && printf %s '$(WEB_BIND)' || printf 127.0.0.1:3000)
 
 REGISTRY   := registry.leviathan.systems
 PROJECT    := logerhub
@@ -59,8 +69,8 @@ deploy: pull
 
 verify:
 	@sleep 5
-	@printf 'ingest  '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$(or $(INGEST_BIND),127.0.0.1:8080)/health || echo 'unreachable'
-	@printf 'console '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$(or $(WEB_BIND),127.0.0.1:3000)/login || echo 'unreachable'
+	@printf 'ingest  '; curl -fsS -o /dev/null -w '%{http_code}\n' "http://$(INGEST_ADDR)/health" || echo 'unreachable'
+	@printf 'console '; curl -fsS -o /dev/null -w '%{http_code}\n' "http://$(WEB_ADDR)/login" || echo 'unreachable'
 
 logs:
 	docker compose logs -f ingest web

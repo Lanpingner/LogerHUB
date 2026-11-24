@@ -6,3 +6,8 @@ apps/web/.next/
 
 # Packed tarballs from `pnpm pack`
 *.tgz
+
+# Local secrets and bindings. Never commit: .env.example is the template.
+.env
+.env.*
+!.env.example

@@ -36,7 +36,9 @@ git clone <this repo> && cd Logguber
 cp .env.example .env
 ```
 
-Fill in `.env`:
+Fill in `.env`. **It is gitignored and must stay that way** — it holds the two
+secrets, and `SESSION_SECRET` is enough on its own to forge an operator session
+cookie and read every log in the console:
 
 ```bash
 CONSOLE_SECRET=$(openssl rand -hex 32)   # console to gateway, internal only
