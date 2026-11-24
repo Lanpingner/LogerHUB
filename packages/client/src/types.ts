@@ -170,6 +170,19 @@ export interface Logger {
    * optionally per message. Returns a function that removes the instrumentation.
    */
   instrumentWs(server: WebSocketServerLike, opts?: WsOptions): () => void
+  /**
+   * Times `fn` and attributes the elapsed time to `name` in the current request's
+   * `meta.http.timings`, wherever in the call stack it runs: no request object is needed.
+   * Returns `fn`'s own value (a promise stays a promise). Repeated names add up.
+   *
+   * Phases are self-reported totals inside server time, not a partition of it: concurrent
+   * phases may sum to more than the wall-clock. At most 16 distinct phases are kept per
+   * request and names are cut to 64 characters; `server` and `transit` are reserved and
+   * ignored. Outside a request it just runs `fn` and records nothing.
+   */
+  time<T>(name: string, fn: () => T): T
+  /** Like `time` for code that does not fit a callback: call the returned function to stop the clock (once). */
+  phase(name: string): () => void
   /** Prints a line locally without streaming it, keeping the in-flight block intact. */
   printLine(text: string): void
   /** Final drain: undelivered batches are written to the spool for the next process. */

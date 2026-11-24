@@ -123,6 +123,34 @@ app.use(log.expressMiddleware({
 
 `captureIp` is off by default, because an IP is personal data. With it on, `trustProxyHops` says how many of your own proxies to trust; the chain is read from the right, since a client can append to `x-forwarded-for`.
 
+## Phase timings
+
+Every request line splits `duration_ms` into `server_ms` (until the first response byte leaves) and `transit_ms` (first byte to finish). To say where the server time went, wrap the work in `logger.time`. It needs no request object, so it works from any depth of the call stack:
+
+```js
+// repo/users.js: knows nothing about Express
+export const findUser = (id) => log.time('db', () => db.query('select ...', [id]))
+
+app.get('/users/:id', async (req, res) => {
+  res.json(await findUser(req.params.id))
+})
+```
+
+The phases land in `meta.http.timings` (`{ db: 18.4 }`), which the console draws as a waterfall. `logger.time` returns whatever the callback returns (promises included) and rethrows its errors. For code that does not fit a callback, `logger.phase` returns a function that stops the clock, once:
+
+```js
+const done = log.phase('render')
+try { renderPage() } finally { done() }
+```
+
+- The same name recorded twice adds up. A request keeps at most 16 distinct phases, and names are cut to 64 characters. `server` and `transit` are reserved and ignored.
+- Outside a request, `time` runs the callback and records nothing. A child logger records into the same request.
+- `timings` is absent when nothing was recorded. If `resolveMeta` also returns a `timings` map, the two merge and a recorded phase wins a clash on the same key.
+- Phases are self-reported totals, not a partition of server time. Concurrent phases can sum to more than the wall-clock, and time you did not wrap simply is not listed.
+- `timings` never contains `server` or `transit`; those stay separate fields so the waterfall adds up.
+
+If `compression` is mounted after the logger middleware, which is the usual order, its response wrapper is the outermost one, so the first-byte mark lands when compression flushes rather than at your application's first write. Gzip time therefore counts inside `server_ms`. That is intended, since compressing is server-side CPU work, but it explains why `server_ms` can exceed the sum of your phases.
+
 ## WebSocket traffic
 
 `instrumentWs` logs a `ws` server's connections. It returns a function that detaches it:

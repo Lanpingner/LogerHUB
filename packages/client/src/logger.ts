@@ -15,6 +15,7 @@ import { ulid } from './ulid'
 import { createExpressMiddleware } from './middleware'
 import { createConsoleView, formatArg, type ConsoleView } from './console'
 import { createWsInstrumentation } from './ws'
+import { startPhase, timePhase } from './phases'
 import type { Logger, LoggerOptions, LogOptions, WebSocketServerLike, WsOptions } from './types'
 
 const DEFAULT_MAX_ENTRIES = 100
@@ -597,6 +598,8 @@ function wrap(
     child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false, headerAllowlist),
     expressMiddleware: (o) => createExpressMiddleware(self, { ...o, headerAllowlist }, core.console),
     instrumentWs: (server, o) => createWsInstrumentation(self, server, o, core.console),
+    time: timePhase,
+    phase: startPhase,
     printLine: (text) => {
       try {
         core.console.raw(String(text))

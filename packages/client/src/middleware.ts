@@ -2,6 +2,7 @@ import type { ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { redactBody, redactHeaders, truncateJson } from './redact'
 import { ulid } from './ulid'
+import { runWithPhases } from './phases'
 import type { ConsoleView } from './console'
 import type { ExpressMiddleware, Logger, MiddlewareOptions, RequestLike } from './types'
 
@@ -100,20 +101,27 @@ export function createExpressMiddleware(
   const rate = typeof opts.sampleRate === 'number' && Number.isFinite(opts.sampleRate) ? opts.sampleRate : 0
 
   return (req, res, next) => {
+    let enter: ((next: () => void) => void) | undefined
     try {
-      track(req, res)
+      enter = track(req, res)
     } catch {
       // Never cost the request its handler.
     }
-    next()
+    // Outside the try on purpose: an error thrown downstream is the application's, not ours to swallow.
+    if (enter !== undefined) enter(next)
+    else next()
   }
 
-  function track(req: RequestLike, res: ServerResponse): void {
+  /** Returns what runs the rest of the stack inside the phase context, or undefined when not tracked. */
+  function track(req: RequestLike, res: ServerResponse): ((next: () => void) => void) | undefined {
     try {
-      if (opts.ignore?.(req) === true) return
+      if (opts.ignore?.(req) === true) return undefined
     } catch {
       // A throwing predicate means "not ignored": an uncounted request is the worse error.
     }
+    // Set when the stack is entered. `emit` runs on a response event, outside the async
+    // context, so the store is unreachable there; this reader closure is the only way back.
+    let readPhases: (() => Record<string, number>) | undefined
     const start = process.hrtime.bigint()
     const startedAt = Date.now()
     const sampled = mode === 'sample' && Math.random() < rate
@@ -184,6 +192,10 @@ export function createExpressMiddleware(
           http.server_ms = Number(firstByteAt - start) / 1e6
           http.transit_ms = Number(finishAt - firstByteAt) / 1e6
         }
+        const phases = readPhases?.() ?? {}
+        const recorded = Object.keys(phases).length > 0
+        // Only app-reported phases: server/transit stay scalars (see above) or the waterfall's sum is wrong.
+        if (recorded) http.timings = phases
         if (ip !== undefined) http.ip = ip
         if (!finished) http.aborted = true
         // Application facts last, but they cannot overwrite the measured ones: a
@@ -191,6 +203,11 @@ export function createExpressMiddleware(
         // the usage counts are derived from.
         for (const [k, v] of Object.entries(resolveExtra(req, res))) {
           if (!Object.hasOwn(http, k)) http[k] = v
+          // The guard above is right for scalars but would silently drop one of two maps: keep
+          // both, recorded phases winning because they are measured and the app's are claimed.
+          else if (k === 'timings' && recorded && v !== null && typeof v === 'object' && !Array.isArray(v)) {
+            http.timings = { ...v, ...phases }
+          }
         }
         const note = resolveNote(req, res)
         if (note !== undefined && !Object.hasOwn(http, 'note')) http.note = note
@@ -219,6 +236,9 @@ export function createExpressMiddleware(
     }
     res.once('finish', () => emit(true))
     res.once('close', () => emit(false))
+    return (next) => {
+      readPhases = runWithPhases(next).phases
+    }
   }
 
   function resolveExtra(req: RequestLike, res: ServerResponse): Record<string, unknown> {

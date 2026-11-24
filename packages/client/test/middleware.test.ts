@@ -522,4 +522,123 @@ test('ordinary log calls never carry kind, even if one is smuggled in', async ()
   expect(e).toHaveLength(2)
   for (const x of e) expect('kind' in x).toBe(false)
 })
+
+test('phases recorded during a request reach meta.http.timings', async () => {
+  const { app, entries, log } = await appWith({})
+  app.get('/phased', async (_req, res) => {
+    await log.time('db', () => sleep(20))
+    await log.time('render', () => sleep(5))
+    res.json({ ok: true })
+  })
+  await request(app).get('/phased').expect(200)
+  const http = (await entries()).at(-1)!.meta.http
+  expect(Object.keys(http.timings).sort()).toEqual(['db', 'render'])
+  expect(http.timings.db).toBeGreaterThanOrEqual(15)
+  expect(http.timings.render).toBeGreaterThanOrEqual(0)
+  expect(http.timings.server).toBeUndefined() // reserved, never a phase
+  expect(http.timings.transit).toBeUndefined()
+  expect(typeof http.server_ms).toBe('number') // the split stays scalar
+})
+
+test('a phase recorded without req, from a nested function, is still attributed', async () => {
+  const { app, entries, log } = await appWith({})
+  const repo = () => log.time('db', () => sleep(20)) // takes no req
+  app.get('/nested', async (_req, res) => {
+    await repo()
+    res.json({ ok: true })
+  })
+  await request(app).get('/nested').expect(200)
+  expect((await entries()).at(-1)!.meta.http.timings.db).toBeGreaterThanOrEqual(15)
+})
+
+test('concurrent requests keep their phases apart', async () => {
+  const { app, entries, log } = await appWith({})
+  app.get('/c/:name', async (req, res) => {
+    await log.time(req.params.name, () => sleep(10))
+    res.json({ ok: true })
+  })
+  await Promise.all([request(app).get('/c/aaa'), request(app).get('/c/bbb')])
+  const keys = (await entries()).map((e) => Object.keys(e.meta.http.timings).join()).sort()
+  expect(keys).toEqual(['aaa', 'bbb'])
+})
+
+test('a child logger records into the same request', async () => {
+  const { app, entries, log } = await appWith({})
+  const child = log.child({ dims: { part: 'x' } })
+  app.get('/child', async (_req, res) => {
+    await child.time('db', () => sleep(5))
+    res.json({ ok: true })
+  })
+  await request(app).get('/child').expect(200)
+  expect((await entries()).at(-1)!.meta.http.timings.db).toBeGreaterThanOrEqual(0)
+})
+
+test('logger.phase records on the returned stop function, once', async () => {
+  const { app, entries, log } = await appWith({})
+  app.get('/manual', async (_req, res) => {
+    const stop = log.phase('cache')
+    await sleep(15)
+    stop()
+    stop()
+    res.json({ ok: true })
+  })
+  await request(app).get('/manual').expect(200)
+  const t = (await entries()).at(-1)!.meta.http.timings
+  expect(t.cache).toBeGreaterThanOrEqual(10)
+  expect(t.cache).toBeLessThan(200)
+})
+
+test('time returns the callback value and rethrows its error', async () => {
+  const { app, entries, log } = await appWith({})
+  let value: unknown
+  let thrown: unknown
+  app.get('/vals', (_req, res) => {
+    value = log.time('sync', () => 42)
+    try {
+      log.time('bad', () => {
+        throw new Error('nope')
+      })
+    } catch (e) {
+      thrown = e
+    }
+    res.json({ ok: true })
+  })
+  await request(app).get('/vals').expect(200)
+  expect(value).toBe(42)
+  expect((thrown as Error).message).toBe('nope')
+  expect(Object.keys((await entries()).at(-1)!.meta.http.timings).sort()).toEqual(['bad', 'sync'])
+})
+
+test('timings is absent when the app records no phase', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/users/1').expect(200)
+  expect('timings' in (await entries())[0].meta.http).toBe(false)
+})
+
+test('a phase outside any request does not throw and is not attributed', async () => {
+  const { app, entries, log } = await appWith({})
+  await expect(log.time('orphan', () => sleep(1))).resolves.toBeUndefined() // no request in flight
+  log.phase('orphan2')()
+  await request(app).get('/users/1').expect(200)
+  expect('timings' in (await entries())[0].meta.http).toBe(false)
+})
+
+test('resolveMeta timings and recorded phases both survive, recorded winning a collision', async () => {
+  const { app, entries, log } = await appWith({ resolveMeta: () => ({ timings: { auth: 7, db: 9999 } }) })
+  app.get('/both', async (_req, res) => {
+    await log.time('db', () => sleep(10))
+    res.json({ ok: true })
+  })
+  await request(app).get('/both').expect(200)
+  const t = (await entries()).at(-1)!.meta.http.timings
+  expect(t.db).toBeGreaterThanOrEqual(5)
+  expect(t.db).toBeLessThan(9999)
+  expect(t.auth).toBe(7)
+})
+
+test('resolveMeta timings pass through untouched when no phase was recorded', async () => {
+  const { app, entries } = await appWith({ resolveMeta: () => ({ timings: { auth: 7 } }) })
+  await request(app).get('/users/1').expect(200)
+  expect((await entries())[0].meta.http.timings).toEqual({ auth: 7 })
+})
 })
