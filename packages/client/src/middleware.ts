@@ -1,6 +1,8 @@
 import type { ServerResponse } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { redactBody, redactHeaders, truncateJson } from './redact'
 import { ulid } from './ulid'
+import type { ConsoleView } from './console'
 import type { ExpressMiddleware, Logger, MiddlewareOptions, RequestLike } from './types'
 
 const DEFAULT_MAX_BODY_BYTES = 8192
@@ -9,6 +11,35 @@ const MAX_REQUEST_ID_LENGTH = 128
 const CLIENT_CLOSED = 499
 /** Internal: `logger.expressMiddleware` passes the logger's header allowlist through. */
 type Options = MiddlewareOptions & { headerAllowlist?: string[] }
+
+/** 8 hex characters: short enough to read off a terminal, wide enough not to collide
+ *  within one request's lifetime. Matches the local logger this replaces. */
+function shortId(): string {
+  try {
+    return randomBytes(4).toString('hex')
+  } catch {
+    return ulid().slice(-8).toLowerCase()
+  }
+}
+
+/**
+ * The caller's address, honouring a fixed number of trusted proxy hops. Counting from the
+ * right is the only safe direction: a client can append to `x-forwarded-for`, so the
+ * rightmost entries are the ones our own proxies wrote.
+ */
+function callerIp(req: RequestLike, hops: number): string | undefined {
+  const direct = req.socket?.remoteAddress
+  if (hops <= 0) return direct ?? undefined
+  const raw = req.headers['x-forwarded-for']
+  const chain = (Array.isArray(raw) ? raw.join(',') : (raw ?? ''))
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+  if (chain.length === 0) return direct ?? undefined
+  // One hop means "the last entry is our proxy's view of the client".
+  const idx = chain.length - hops
+  return (idx >= 0 ? chain[idx] : chain[0]) ?? direct ?? undefined
+}
 
 /** The one rule for "should this exchange's bodies be captured": errors, plus whatever the mode adds. */
 function capturesBodies(mode: string, status: number, sampled: boolean): boolean {
@@ -58,7 +89,11 @@ function requestBody(req: RequestLike, maxBytes: number, allowFields?: string[])
  * connection closes without finishing, so an aborted request is still counted. Nothing in here
  * may break the request: every foreign call is guarded and the original `write`/`end` always run.
  */
-export function createExpressMiddleware(logger: Logger, opts: Options = {}): ExpressMiddleware {
+export function createExpressMiddleware(
+  logger: Logger,
+  opts: Options = {},
+  view?: ConsoleView,
+): ExpressMiddleware {
   const mode = opts.bodies ?? 'on-error'
   const maxBytes =
     typeof opts.maxBodyBytes === 'number' && opts.maxBodyBytes >= 1 ? Math.floor(opts.maxBodyBytes) : DEFAULT_MAX_BODY_BYTES
@@ -80,28 +115,74 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
       // A throwing predicate means "not ignored": an uncounted request is the worse error.
     }
     const start = process.hrtime.bigint()
+    const startedAt = Date.now()
     const sampled = mode === 'sample' && Math.random() < rate
     const body = mode === 'never' ? undefined : captureResponse(res, mode, sampled, maxBytes)
     let emitted = false
 
+    // The id is settled on entry, not on finish: the in-flight line must carry the
+    // same id the finished line will.
+    const supplied = (() => {
+      try {
+        const v = opts.requestId?.(req)
+        return typeof v === 'string' && v !== '' ? v.slice(0, MAX_REQUEST_ID_LENGTH) : undefined
+      } catch {
+        return undefined
+      }
+    })()
+    const header = req.headers['x-request-id']
+    const requestId =
+      supplied ??
+      (typeof header === 'string' && header !== '' ? header.slice(0, MAX_REQUEST_ID_LENGTH) : shortId())
+    const ip = opts.captureIp === true ? callerIp(req, opts.trustProxyHops ?? 0) : undefined
+
+    if (opts.pending === true && view !== undefined) {
+      try {
+        view.pendingAdd({
+          id: requestId,
+          method: req.method ?? '',
+          url: (req.originalUrl ?? req.url ?? '').split('?')[0],
+          ip,
+          startedAt,
+        })
+      } catch {
+        // A terminal that will not redraw must not cost the request.
+      }
+    }
+
     const emit = (finished: boolean): void => {
       if (emitted) return
       emitted = true
+      if (opts.pending === true && view !== undefined) {
+        try {
+          view.pendingRemove(requestId)
+        } catch {
+          // Leaves a stale in-flight line at worst.
+        }
+      }
       try {
         const status = finished || res.headersSent ? res.statusCode : CLIENT_CLOSED
         const route = routeOf(req)
-        const rid = req.headers['x-request-id']
         const http: Record<string, unknown> = {
           method: req.method,
           route,
           path: (req.originalUrl ?? req.url ?? '').split('?')[0],
           status,
           duration_ms: Number(process.hrtime.bigint() - start) / 1e6,
-          request_id: typeof rid === 'string' && rid !== '' ? rid.slice(0, MAX_REQUEST_ID_LENGTH) : ulid(),
+          request_id: requestId,
           req: { headers: redactHeaders(req.headers, opts.headerAllowlist) },
           res: {},
         }
+        if (ip !== undefined) http.ip = ip
         if (!finished) http.aborted = true
+        // Application facts last, but they cannot overwrite the measured ones: a
+        // resolveMeta that returns `status` must not be able to rewrite the status
+        // the usage counts are derived from.
+        for (const [k, v] of Object.entries(resolveExtra(req, res))) {
+          if (!Object.hasOwn(http, k)) http[k] = v
+        }
+        const note = resolveNote(req, res)
+        if (note !== undefined && !Object.hasOwn(http, 'note')) http.note = note
         if (capturesBodies(mode, status, sampled)) {
           // Its own guard: a body that cannot be read costs the bodies, never the line the
           // usage counts are derived from.
@@ -127,6 +208,31 @@ export function createExpressMiddleware(logger: Logger, opts: Options = {}): Exp
     }
     res.once('finish', () => emit(true))
     res.once('close', () => emit(false))
+  }
+
+  function resolveExtra(req: RequestLike, res: ServerResponse): Record<string, unknown> {
+    if (opts.resolveMeta === undefined) return {}
+    try {
+      const out = opts.resolveMeta(req, res)
+      if (out === null || typeof out !== 'object') return {}
+      // Undefined values are dropped rather than written: `app: undefined` should read
+      // as "no app", not as a key whose value is missing.
+      const kept: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(out)) if (v !== undefined) kept[k] = v
+      return kept
+    } catch {
+      return {} // costs the extra fields, not the entry
+    }
+  }
+
+  function resolveNote(req: RequestLike, res: ServerResponse): string | undefined {
+    if (opts.note === undefined) return undefined
+    try {
+      const v = opts.note(req, res)
+      return typeof v === 'string' && v !== '' ? v : undefined
+    } catch {
+      return undefined
+    }
   }
 
   function resolveDims(req: RequestLike): Record<string, string> | undefined {

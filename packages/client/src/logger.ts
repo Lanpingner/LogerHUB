@@ -13,7 +13,9 @@ import { createSpool, type Spool } from './spool'
 import { createTransport, type Transport, type TransportState } from './transport'
 import { ulid } from './ulid'
 import { createExpressMiddleware } from './middleware'
-import type { Logger, LoggerOptions, LogOptions } from './types'
+import { createConsoleView, formatArg, type ConsoleView } from './console'
+import { createWsInstrumentation } from './ws'
+import type { Logger, LoggerOptions, LogOptions, WebSocketServerLike, WsOptions } from './types'
 
 const DEFAULT_MAX_ENTRIES = 100
 const DEFAULT_MAX_MS = 1000
@@ -208,6 +210,10 @@ export interface RawEntry {
 export interface LoggerCore {
   /** Normalises, redacts and enqueues. Synchronous, non-blocking, and never throws. */
   accept(raw: RawEntry, dims?: Record<string, unknown>): void
+  /** Local terminal output. A no-op view unless `console.enabled` was set. */
+  console: ConsoleView
+  /** Rate-limited internal failure reporting, for the layers above this one. */
+  report(source: string, e: unknown): void
   /** `child()`'s merge, done here so a hostile source is reported rather than thrown. */
   mergeChildDims(parent: Record<string, string>, extra?: Record<string, unknown>): Record<string, string>
   flush(): Promise<void>
@@ -232,6 +238,15 @@ export function createCore(opts: LoggerOptions): LoggerCore {
 export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
   const report = createReporter(opts.onError)
   const baseDims = mergeDims([opts.dims], (e) => report('dims', e))
+  // Built first: a failure here must not be reported through a console that does
+  // not exist yet, and `enqueue` depends on it.
+  let view: ConsoleView
+  try {
+    view = createConsoleView(opts.console, opts.service)
+  } catch (e) {
+    report('console', e)
+    view = createConsoleView(undefined, opts.service)
+  }
   const mode = opts.spool?.mode ?? 'on-failure'
   const maxEntries = sane(opts.batch?.maxEntries, DEFAULT_MAX_ENTRIES)
   const maxQueue = sane(opts.batch?.maxQueue, DEFAULT_MAX_QUEUE)
@@ -468,6 +483,12 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
     storeInFlight(true) // before close(), which forgets the transport's pending batches
     await transport.close()
     store.close()
+    // Last, and outside the drain: leaves the terminal as we found it.
+    try {
+      view.close()
+    } catch {
+      // Closing is already best effort by this point.
+    }
   }
 
   /** Builds, redacts and queues one entry. Only `accept` calls it, and only inside a try. */
@@ -488,10 +509,19 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
       const meta = truncateJson(redactBody(raw.meta, { redactKeys: opts.redactKeys }))
       if (meta !== undefined) entry.meta = asRecord(meta)
     }
+    // After redaction and truncation, before the queue: the terminal shows exactly
+    // what the gateway will store, and no secret can reach the screen either.
+    try {
+      view.write(entry)
+    } catch (e) {
+      report('console', e)
+    }
     batcher.push(entry)
   }
 
   return {
+    console: view,
+    report,
     accept(raw, dims) {
       try {
         enqueue(raw, dims)
@@ -531,25 +561,86 @@ function wrap(
 ): Logger {
   // The call's own dimensions travel on the entry so that merging them — the one step that can
   // run a caller's getter — happens inside `accept`, where nothing escapes.
-  const log = (level: string, msg: string, o?: LogOptions): void => {
+  const emit = (level: string, msg: string, o?: LogOptions): void => {
     core.accept({ level, msg, dims: o?.dims, meta: o?.meta, kind: o?.kind }, dims)
   }
+  /**
+   * Formatting runs a caller's `toString`, so it is guarded here rather than inside
+   * `accept`: an argument that cannot be rendered costs the entry and is reported,
+   * and never reaches the application's own code path.
+   */
+  const composed = (msg: unknown, rest: unknown[]): { text: string; options?: LogOptions } | undefined => {
+    try {
+      return compose(msg, rest)
+    } catch (e) {
+      core.report('format', e)
+      return undefined
+    }
+  }
+  const log = (level: string, msg: unknown, ...rest: unknown[]): void => {
+    const c = composed(msg, rest)
+    if (c !== undefined) emit(level, c.text, c.options)
+  }
   // `kind` is the middleware's to set: the level methods drop it, so an ordinary call never produces one.
-  const plain = (level: string, msg: string, o?: LogOptions): void =>
-    log(level, msg, o === undefined ? o : { dims: o.dims, meta: o.meta })
+  const plain = (level: string) => (msg: unknown, ...rest: unknown[]): void => {
+    const c = composed(msg, rest)
+    if (c === undefined) return
+    emit(level, c.text, c.options === undefined ? c.options : { dims: c.options.dims, meta: c.options.meta })
+  }
   const self: Logger = {
     log,
-    debug: (msg, o) => plain('debug', msg, o),
-    info: (msg, o) => plain('info', msg, o),
-    warn: (msg, o) => plain('warn', msg, o),
-    error: (msg, o) => plain('error', msg, o),
-    fatal: (msg, o) => plain('fatal', msg, o),
+    debug: plain('debug'),
+    info: plain('info'),
+    warn: plain('warn'),
+    error: plain('error'),
+    fatal: plain('fatal'),
     child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false, headerAllowlist),
-    expressMiddleware: (o) => createExpressMiddleware(self, { ...o, headerAllowlist }),
+    expressMiddleware: (o) => createExpressMiddleware(self, { ...o, headerAllowlist }, core.console),
+    instrumentWs: (server, o) => createWsInstrumentation(self, server, o, core.console),
+    printLine: (text) => {
+      try {
+        core.console.raw(String(text))
+      } catch {
+        // A console that cannot print must not break the caller.
+      }
+    },
     flush: () => core.flush(),
     close: owned ? () => core.close() : () => Promise.resolve(),
   }
   return self
+}
+
+const OPTION_KEYS = ['dims', 'meta', 'kind']
+
+/**
+ * Reads a variadic call. A trailing plain object whose keys are all option names is taken as
+ * options; everything else is a message part, joined with a space. The ambiguous case — an
+ * object argument — resolves to "message part", which is what a local console logger did with
+ * it, so existing call sites keep printing what they printed.
+ */
+function isOptions(v: unknown): v is LogOptions {
+  if (v === null || typeof v !== 'object' || Array.isArray(v) || v instanceof Error) return false
+  // A proxy can throw from its own key enumeration; that only means "not options".
+  let keys: string[]
+  try {
+    keys = Object.keys(v)
+  } catch {
+    return false
+  }
+  return keys.length > 0 && keys.every((k) => OPTION_KEYS.includes(k))
+}
+
+function compose(msg: unknown, rest: unknown[]): { text: string; options?: LogOptions } {
+  if (rest.length === 0) {
+    // The common single-argument call: no array work, and a string is not re-stringified.
+    return { text: typeof msg === 'string' ? msg : formatArg(msg) }
+  }
+  const last = rest[rest.length - 1]
+  const options = isOptions(last) ? last : undefined
+  const parts = options === undefined ? rest : rest.slice(0, -1)
+  const head = typeof msg === 'string' ? msg : formatArg(msg)
+  const text = parts.length === 0 ? head : head + ' ' + parts.map(formatArg).join(' ')
+  return { text, options }
 }
 
 export function createLogger(opts: LoggerOptions): Logger {

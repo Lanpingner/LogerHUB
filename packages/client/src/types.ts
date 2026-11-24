@@ -27,6 +27,28 @@ export interface BatchConfig {
   maxQueue?: number
 }
 
+/** Local terminal output, so one call both prints and streams.
+ *  Off by default: a logging library should not write to your stdout uninvited. */
+export interface ConsoleConfig {
+  enabled?: boolean
+  /** Minimum level to print locally. The gateway still receives everything. */
+  level?: 'debug' | 'info' | 'warn' | 'error' | 'fatal'
+  /** Defaults to whether stdout is a TTY. `NO_COLOR` always wins. */
+  color?: boolean
+  /** Prefix on non-request lines. Defaults to the entry script's filename, then the service. */
+  label?: string
+  /** Redraw in-flight requests at the bottom of the terminal. TTY only. */
+  pending?: boolean
+  /** Also append the uncoloured line here. Optional: the gateway is the durable copy. */
+  file?: string
+  /** Letters drawn in the auth tag, in order. Default `['A', 'P', 'R']`. */
+  authTagLetters?: string[]
+  /** Letters always drawn as "ran, uncached" — a check that is never served from a cache. Default `['R']`. */
+  authTagAlways?: string[]
+  /** Test seam. */
+  stream?: NodeJS.WriteStream
+}
+
 export interface LoggerOptions {
   url: string
   apiKey: string
@@ -42,6 +64,8 @@ export interface LoggerOptions {
   redactKeys?: string[]
   /** Replaces the default request-header allowlist. */
   headerAllowlist?: string[]
+  /** Prints every entry locally as well as streaming it. Off unless enabled. */
+  console?: ConsoleConfig
   /** Every internal failure, rate-limited per cause. Defaults to one `console.warn` per interval. */
   onError?: (e: Error) => void
 }
@@ -85,15 +109,51 @@ export interface MiddlewareOptions {
   maxBodyBytes?: number
   /** When set, only these top-level body fields are captured. */
   allowFields?: string[]
+  /**
+   * Extra fields for `meta.http`, read when the response finishes. This is where
+   * application facts that are not dimensions belong: which auth path ran, whether
+   * it was cached, why a request was refused.
+   *
+   * Four keys are reserved, and the console renders them on the request line:
+   * - `auth: { type, cached }` draws the auth tag, dimming the letters that did not run
+   * - `tags: { app: 'x' }`     appends ` app:x`
+   * - `flags: ['ip-exc']`      appends ` ip-exc`
+   * - `note: 'why'`            appends ` (why)`
+   * They are ordinary metadata too, so the gateway stores and can search them.
+   */
+  resolveMeta?: (req: RequestLike, res: ServerResponse) => Record<string, unknown> | undefined
+  /** Reuse an id your application already assigned, instead of generating one. */
+  requestId?: (req: RequestLike) => string | undefined
+  /** Capture the caller's address. Off by default: an IP is personal data. */
+  captureIp?: boolean
+  /** Trusted proxy hops when reading `x-forwarded-for` for `captureIp`. Default 0. */
+  trustProxyHops?: number
+  /** Show this request in the terminal's in-flight block while it runs. */
+  pending?: boolean
+  /** A short note appended to the console line, such as a refusal reason. */
+  note?: (req: RequestLike, res: ServerResponse) => string | undefined
 }
 
 export type ExpressMiddleware = (req: RequestLike, res: ServerResponse, next: (err?: unknown) => void) => void
 
-export type LogMethod = (msg: string, opts?: LogOptions) => void
+/**
+ * Accepts the shape a local console logger has: `info('a', err, { n: 1 })` joins its
+ * arguments into one message, Errors as their stack. A trailing object whose only keys
+ * are `dims`, `meta` and/or `kind` is read as options instead of as a message part.
+ */
+export type LogMethod = (msg: unknown, ...rest: unknown[]) => void
+
+/** What `meta.http.auth` must look like for the console to draw the auth tag. */
+export interface AuthTag {
+  /** Which check ran. Any single letter; the console dims the letters that did not run. */
+  type?: string
+  /** Served from a cache rather than the database. Drawn in a different colour. */
+  cached?: boolean
+}
 
 export interface Logger {
   /** Any string is accepted; an unknown level is recorded as `info`. */
-  log(level: string, msg: string, opts?: LogOptions): void
+  log(level: string, msg: unknown, ...rest: unknown[]): void
   debug: LogMethod
   info: LogMethod
   warn: LogMethod
@@ -105,8 +165,50 @@ export interface Logger {
   flush(): Promise<void>
   /** One `kind: 'request'` entry per HTTP request. Mount with `app.use(log.expressMiddleware())`. */
   expressMiddleware(opts?: MiddlewareOptions): ExpressMiddleware
+  /**
+   * Instruments a `ws` server: one entry per connection, close and error, and
+   * optionally per message. Returns a function that removes the instrumentation.
+   */
+  instrumentWs(server: WebSocketServerLike, opts?: WsOptions): () => void
+  /** Prints a line locally without streaming it, keeping the in-flight block intact. */
+  printLine(text: string): void
   /** Final drain: undelivered batches are written to the spool for the next process. */
   close(): Promise<void>
+}
+
+/** The parts of a `ws` server the instrumentation uses, so the package needs no `ws` types. */
+export interface WebSocketServerLike {
+  on(event: 'connection', cb: (socket: WebSocketLike, req: IncomingMessage) => void): unknown
+  off?(event: 'connection', cb: (socket: WebSocketLike, req: IncomingMessage) => void): unknown
+}
+
+export interface WebSocketLike {
+  on(event: string, cb: (...args: never[]) => void): unknown
+  off?(event: string, cb: (...args: never[]) => void): unknown
+  send?: unknown
+}
+
+export interface WsOptions {
+  /** Dimensions for every entry from this connection, read once when it opens. */
+  resolveDims?: (req: IncomingMessage) => Record<string, string | undefined>
+  /** Return true to ignore a connection entirely. */
+  ignore?: (req: IncomingMessage) => boolean
+  /**
+   * `none` (default) logs only open, close and error; `meta` adds one entry per
+   * message with its size and direction; `payload` also captures the message body,
+   * redacted and size-capped. A busy socket makes `payload` expensive.
+   */
+  messages?: 'none' | 'meta' | 'payload'
+  /** Cap on a captured payload. Default 2048. */
+  maxPayloadBytes?: number
+  /** Show open connections in the terminal's in-flight block. */
+  pending?: boolean
+  /** Reuse an id your application already assigned to the connection. */
+  connectionId?: (req: IncomingMessage) => string | undefined
+  /** Capture the caller's address. Off by default: an IP is personal data. */
+  captureIp?: boolean
+  /** Trusted proxy hops when reading `x-forwarded-for` for `captureIp`. Default 0. */
+  trustProxyHops?: number
 }
 
 /** The low-level surface a pino or winston adapter writes through. */

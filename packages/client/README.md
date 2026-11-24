@@ -19,7 +19,7 @@ import express from 'express'
 import { createLogger } from '@leviathan.systems/logerhub-client'
 
 const log = createLogger({
-  url: process.env.LOGGUBER_URL,     // e.g. wss://logs.example.com/ingest
+  url: process.env.LOGGUBER_URL,     // wss://logs.example.com/v1/stream
   apiKey: process.env.LOGGUBER_KEY,
   service: 'office-api',
   env: 'production',
@@ -51,7 +51,99 @@ log.error('payment failed', { meta: { orderId } })
 const child = log.child({ dims: { company_id: '42' } })
 ```
 
-Other constructor options: `dims` (stamped on every entry), `batch` (`maxEntries`, `maxMs`, `maxQueue`), `backoff` (`baseMs`, `maxMs`), `headerAllowlist`, `redactKeys`, `onError`.
+Every log method takes extra arguments, which are joined into the message. An `Error` contributes its stack, so `log.error('charge failed:', err)` keeps the stack instead of dropping it:
+
+```js
+log.info('order', { sku: 'A1', qty: 2 })   // → 'order {"sku":"A1","qty":2}'
+log.error('charge failed:', err)           // → 'charge failed: Error: ...\n    at ...'
+```
+
+A trailing object whose only keys are `dims`, `meta` and/or `kind` is read as options rather than as part of the message. Any other object is message content, so `log.info('order', { sku: 'A1' })` logs the object and does not silently become metadata.
+
+Other constructor options: `dims` (stamped on every entry), `batch` (`maxEntries`, `maxMs`, `maxQueue`), `backoff` (`baseMs`, `maxMs`), `headerAllowlist`, `redactKeys`, `console`, `onError`.
+
+## Local console output
+
+The client can also be the terminal logger, so one call both prints locally and streams to the gateway. It is off by default — a logging library should not write to your stdout uninvited:
+
+```js
+const log = createLogger({
+  // ...
+  console: {
+    enabled: true,
+    level: 'debug',     // local floor; the gateway still receives everything
+    pending: true,      // redraw in-flight requests at the bottom of the terminal (TTY only)
+    file: './log/logfile.log',   // also append the uncoloured line
+  },
+})
+```
+
+Lines are printed **after** redaction, so a secret cannot reach the screen either. Colour follows whether the stream is a TTY, and `NO_COLOR` always wins.
+
+Two layouts, both fixed (they are pinned by tests, because people read them):
+
+```
+2026-11-24 11:13:44 INFO  [index.js]: cache warmed
+11:13:44     +4ms GET     [APR] [a1b2c3d4] /users/1 from 127.0.0.1 app:OFF ip-exc user:42 — 200 (cached)
+11:13:44     +0ms GET     [a1b2c3d4] /users/1 from 127.0.0.1 — pending...
+```
+
+The non-request label defaults to the entry script's filename, then to the service name; set `label` to override it.
+
+### Decorating the request line
+
+Four keys in `meta.http` are reserved, and the console renders them. They are ordinary metadata too, so the gateway stores them and you can search on them:
+
+| Key | Renders as |
+|---|---|
+| `auth: { type, cached }` | the `[APR]` tag — letters that ran are coloured (purple cached, red live), the rest dimmed |
+| `tags: { app: 'OFF' }` | ` app:OFF`; a value of `true` renders as a bare word, so one ordered record controls the whole sequence |
+| `flags: ['ip-exc']` | ` ip-exc` |
+| `note: 'cached'` | ` (cached)` |
+
+Supply them from `resolveMeta`, which runs when the response finishes:
+
+```js
+app.use(log.expressMiddleware({
+  pending: true,
+  captureIp: true,
+  requestId: (req) => req.id,          // reuse an id you already assigned
+  resolveMeta: (req, res) => ({
+    auth: res.authType ? { type: res.authType, cached: Boolean(res.authCached) } : undefined,
+    tags: { app: req.app_id_prefix, 'ip-exc': req.ip_exception || undefined, user: req.userid },
+  }),
+  note: (req, res) => res.authReason,
+  ignore: (req) => req.path === '/metrics' || req.path === '/internal/log',
+}))
+```
+
+`resolveMeta` cannot overwrite the measured fields (`status`, `duration_ms`, `method`, `route`, `request_id`): usage counts are derived from those. The tag letters are configurable with `authTagLetters` and `authTagAlways` on the `console` options.
+
+`captureIp` is off by default, because an IP is personal data. With it on, `trustProxyHops` says how many of your own proxies to trust; the chain is read from the right, since a client can append to `x-forwarded-for`.
+
+## WebSocket traffic
+
+`instrumentWs` logs a `ws` server's connections. It returns a function that detaches it:
+
+```js
+import { WebSocketServer } from 'ws'
+
+const wss = new WebSocketServer({ server })
+log.instrumentWs(wss, {
+  messages: 'meta',          // 'none' (default) | 'meta' | 'payload'
+  resolveDims: (req) => ({ company_id: companyFromToken(req) }),
+  ignore: (req) => req.url === '/internal',
+  pending: true,             // show open connections in the in-flight block
+})
+```
+
+One entry per connection open, close and error. `close` carries the code, reason, duration and the message counts in each direction. `messages: 'meta'` adds an entry per message with its size and direction; `payload` also captures the body, redacted and size-capped (`maxPayloadBytes`, default 2048) — and only when it parses as JSON, since nothing else can be redacted by key.
+
+Outbound frames are counted by wrapping `send`, because `ws` emits no event for them. The original is always called: the instrumentation never replaces your own listeners, and a failure to log never stops a frame.
+
+### Printing without streaming
+
+`log.printLine(text)` writes a line locally and sends nothing, keeping the in-flight block intact. Use it for banners and startup notices that are not log entries.
 
 ## Redaction
 
