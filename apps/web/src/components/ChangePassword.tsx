@@ -45,7 +45,18 @@ export function ChangePassword({ email, forced, minLength }: { email: string; fo
         // Without this an unexpected server failure reaches the browser as an
         // unhandled rejection, which Next shows as a full error page — the
         // screen least able to explain what to do about it.
-        setError('The server could not complete that: ' + (e instanceof Error ? e.message : String(e)))
+        //
+        // The common cause on a self-hosted install is a page left open across a
+        // deploy: server action ids are per-build, so the one this tab holds no
+        // longer exists and the server answers 409. React reports that as a
+        // generic minified error, which says nothing about the one-key fix.
+        const message = e instanceof Error ? e.message : String(e)
+        const stale = /Server Action|older or newer deployment|#441|not found/i.test(message)
+        setError(
+          stale
+            ? 'This page was loaded before the server was updated. Reload it (Ctrl+Shift+R) and try again — your password has not been changed.'
+            : 'The server could not complete that: ' + message,
+        )
         return
       }
       if (!result.ok) {
