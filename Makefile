@@ -24,7 +24,13 @@ PLATFORM   ?= linux/amd64
 # them. Override on the command line: `make build TAG=release`.
 export REGISTRY PROJECT TAG
 
-.PHONY: help env build push release pull deploy logs down verify
+.PHONY: help env build push release pull deploy logs down verify cert tls-up
+
+# The address a browser will type. `make cert HOST=203.0.113.4` or
+# HOST=logs.example.com. Validated below before it reaches a shell: a hostname
+# is data, and interpolating one unchecked into a recipe executes it.
+HOST ?=
+VALID_HOST := ^[A-Za-z0-9.:_-]+$$
 .DEFAULT_GOAL := help
 
 help:
@@ -41,6 +47,10 @@ help:
 	@echo '    make pull            pull the images, no build'
 	@echo '    make deploy          pull, then restart the stack'
 	@echo '    make logs            follow the gateway and console logs'
+	@echo ''
+	@echo '  HTTPS without a domain (reached by IP):'
+	@echo '    make cert HOST=1.2.3.4   self-signed certificate for that address'
+	@echo '    make tls-up              start the stack with nginx on 80/443'
 	@echo ''
 	@echo '  TAG=$(TAG)  REGISTRY=$(REGISTRY)  PROJECT=$(PROJECT)'
 
@@ -87,6 +97,46 @@ deploy: pull
 	docker compose up -d --no-build
 	@echo ''
 	@$(MAKE) --no-print-directory verify
+
+# --- HTTPS with no domain --------------------------------------------------
+
+# A self-signed certificate for an address. Browsers will warn once; what it
+# buys is that the session cookie and the password stop crossing the network in
+# clear text, which is what COOKIE_INSECURE=1 gives up.
+#
+# The address goes in subjectAltName, not just the subject: a certificate with
+# only a CN is rejected outright by every current browser, and for an IP the
+# entry has to be IP:, not DNS:, or it will not match either.
+cert:
+	@printf %s '$(HOST)' | grep -Eq '$(VALID_HOST)' || \
+		{ echo 'Set HOST to the address a browser will use: make cert HOST=1.2.3.4' >&2; exit 1; }
+	@command -v openssl >/dev/null 2>&1 || { echo 'openssl is not installed.' >&2; exit 1; }
+	@if [ -e deploy/certs/logerhub.key ]; then \
+		echo 'deploy/certs/logerhub.key already exists — delete it to issue a new one.'; \
+	else \
+		case '$(HOST)' in \
+			*[!0-9.:]*) san='DNS:$(HOST)';; \
+			*) san='IP:$(HOST)';; \
+		esac; \
+		mkdir -p deploy/certs && umask 077 && \
+		openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+			-keyout deploy/certs/logerhub.key \
+			-out deploy/certs/logerhub.crt \
+			-subj '/CN=$(HOST)' -addext "subjectAltName=$$san" >/dev/null 2>&1 && \
+		chmod 644 deploy/certs/logerhub.crt && \
+		echo "certificate issued for $$san, valid 10 years:" && \
+		openssl x509 -in deploy/certs/logerhub.crt -noout -subject -ext subjectAltName; \
+	fi
+
+# nginx is the only public service, so the two app ports go back to loopback.
+# Without that they stay reachable on plain HTTP and the TLS is decoration.
+tls-up:
+	@[ -e deploy/certs/logerhub.crt ] || { echo 'No certificate yet: make cert HOST=<address>' >&2; exit 1; }
+	@grep -Eq '^(INGEST|WEB)_BIND=0\.0\.0\.0' .env 2>/dev/null && \
+		echo 'WARNING: .env still binds a service to 0.0.0.0 — set both to 127.0.0.1 so only nginx is public.' || true
+	docker compose --profile nginx up -d
+	@echo ''
+	@printf 'https  '; curl -fsSk -o /dev/null -w '%{http_code}\n' "https://$(if $(HOST),$(HOST),localhost)/login" || echo 'unreachable'
 
 verify:
 	@sleep 5

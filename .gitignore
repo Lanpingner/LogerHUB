@@ -14,3 +14,6 @@ apps/web/.next/
 
 # Next/TS build state
 *.tsbuildinfo
+
+# Self-signed certificates: private keys never belong in a public repo.
+deploy/certs/
