@@ -39,9 +39,38 @@ export function readSession(token: string | undefined): { email: string } | null
   }
 }
 
+/**
+ * Who the session says you are. It does NOT consider whether the account still
+ * has its bootstrap password, so it answers "is this a valid session" and nothing
+ * more. Pages and the root layout use it: the layout is what replaces the console
+ * with the change-password screen, and a page that redirected instead would bounce
+ * a flagged operator to a login form they are already past.
+ *
+ * Anything that ACTS — a server action, an API route — must use
+ * `activeOperator()` instead.
+ */
 export async function currentOperator(): Promise<{ email: string } | null> {
   const jar = await cookies()
   return readSession(jar.get(COOKIE)?.value)
+}
+
+/**
+ * A session whose account is fully set up. Null while the account still has the
+ * password it was created with, so a flagged operator can read nothing and change
+ * nothing but their own password.
+ *
+ * The layout's gate only governs what is rendered. Server actions and API routes
+ * are separately addressable endpoints that never go through it, so without this
+ * a `admin`/`admin` login could mint an API key or read every log by POSTing
+ * directly — which would defeat the point of forcing the change at all.
+ */
+export async function activeOperator(): Promise<{ email: string } | null> {
+  const session = await currentOperator()
+  if (!session) return null
+  const row = operatorByEmail(session.email)
+  // No row means the account was deleted under a live session: fail closed.
+  if (!row || row.must_change_password === 1) return null
+  return { email: session.email }
 }
 
 export async function login(email: string, password: string): Promise<{ ok: true } | { ok: false; error: string }> {

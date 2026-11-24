@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { randomUUID } from 'node:crypto'
 import { mintKey } from '@logguber/shared/keys'
 import { hashPassword, verifyPassword, MIN_PASSWORD_LENGTH } from '@logguber/shared/password'
-import { currentOperator, logout } from '../lib/auth'
+import { activeOperator, currentOperator, logout } from '../lib/auth'
 import {
   disableKey,
   insertKey,
@@ -21,6 +21,16 @@ const CONSOLE_SECRET = process.env.CONSOLE_SECRET ?? ''
 /** Server actions are independently addressable POST endpoints: a page's own
  *  auth check does not protect them, so every action re-verifies the session. */
 async function requireOperator() {
+  // `activeOperator`, not `currentOperator`: an account that still has its
+  // bootstrap password must not be able to mint a key or change settings by
+  // POSTing straight to an action, bypassing the layout's gate entirely.
+  const operator = await activeOperator()
+  if (!operator) throw new Error('unauthorised')
+  return operator
+}
+
+/** For the two things a not-yet-set-up account is allowed to do. */
+async function requireSession() {
   const operator = await currentOperator()
   if (!operator) throw new Error('unauthorised')
   return operator
@@ -100,7 +110,7 @@ export async function changePasswordAction(
   current: string,
   next: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const operator = await requireOperator()
+  const operator = await requireSession()
   const row = operatorByEmail(operator.email)
   if (!row) return { ok: false, error: 'That account no longer exists.' }
   if (!verifyPassword(current, row.password_hash)) return { ok: false, error: 'The current password is wrong.' }

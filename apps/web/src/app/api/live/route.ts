@@ -1,4 +1,4 @@
-import { currentOperator } from '../../../lib/auth'
+import { activeOperator } from '../../../lib/auth'
 
 const INGEST_URL = (process.env.INGEST_INTERNAL_URL ?? 'http://localhost:8080').replace(/\/$/, '')
 const CONSOLE_SECRET = process.env.CONSOLE_SECRET ?? ''
@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic'
  *  storage round trip, which is the whole point of fanning out at the gateway
  *  rather than polling Loki's tail endpoint. */
 export async function GET(req: Request) {
-  if (!(await currentOperator())) {
+  if (!(await activeOperator())) {
     return new Response('unauthorised', { status: 401 })
   }
   if (!CONSOLE_SECRET) {

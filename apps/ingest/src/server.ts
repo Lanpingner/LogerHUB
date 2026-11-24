@@ -51,10 +51,13 @@ function bootstrapOperator(): void {
   try {
     if (store.operatorCount() > 0) return
     store.insertOperator(randomUUID(), 'admin', hashPassword('admin'), true)
+    // The password is not logged. It is a documented constant, so printing it
+    // buys nothing and these lines are shipped to journald, Docker's log driver
+    // and whatever collects from there.
     log('bootstrapped the first operator', {
       user: 'admin',
-      password: 'admin',
-      warning: 'change it at first login; the console will not serve anything else until you do',
+      password: 'see the README: it is the documented default, and must be changed at first login',
+      warning: 'the console serves nothing but the change-password screen until it is replaced',
     })
   } catch (e) {
     log('could not bootstrap the first operator', { error: String(e) })

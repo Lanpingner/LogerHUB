@@ -1,11 +1,11 @@
-import { currentOperator } from '../../../lib/auth'
+import { activeOperator } from '../../../lib/auth'
 import { bucketsFromRows, searchLogs, volume } from '../../../lib/server-queries'
 import { minutesFor } from '../../../lib/tokens'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
-  if (!(await currentOperator())) return new Response('unauthorised', { status: 401 })
+  if (!(await activeOperator())) return new Response('unauthorised', { status: 401 })
   const url = new URL(req.url)
   const minutes = minutesFor(url.searchParams.get('range') ?? '1h')
   const limit = Math.min(2000, Number(url.searchParams.get('limit')) || 500)
