@@ -30,6 +30,22 @@ async function requireOperator() {
   return operator
 }
 
+/**
+ * Logs an unexpected failure in full and returns a short reference for it.
+ *
+ * The message itself never goes to the caller. Server actions are addressable
+ * endpoints, so an unauthenticated POST that makes something throw would
+ * otherwise be handed whatever the exception says — a SQLite error naming the
+ * database path, a module path, a stack frame. The reference is what ties the
+ * screen in front of a person to the line in `docker compose logs web`, which
+ * is the part that was actually worth having.
+ */
+function reportFailure(where: string, e: unknown): string {
+  const ref = Math.random().toString(16).slice(2, 8)
+  console.error(`[${ref}] ${where} failed`, e)
+  return ref
+}
+
 /** For the two things a not-yet-set-up account is allowed to do. */
 async function requireSession() {
   const operator = await currentOperator()
@@ -161,10 +177,11 @@ export async function changePasswordAction(
     // router.refresh() once it has the result, which is ordered and visible.
     return { ok: true }
   } catch (e) {
-    // Logged in full server-side, where the message is not stripped, and
-    // returned in short form so the person at the screen has something to act on.
-    console.error('changePasswordAction failed', e)
-    return { ok: false, error: 'The server could not change it: ' + (e instanceof Error ? e.message : String(e)) }
+    const ref = reportFailure('changePasswordAction', e)
+    return {
+      ok: false,
+      error: `The server could not change the password (ref ${ref}). The reason is in: docker compose logs web | grep ${ref}`,
+    }
   }
 }
 
@@ -218,7 +235,11 @@ export async function createKeyAction(
       ip_allowlist: allowlist,
     })
   } catch (e) {
-    return { ok: false, error: 'Could not save the key: ' + String(e) }
+    const ref = reportFailure('createKeyAction', e)
+    return {
+      ok: false,
+      error: `The key could not be saved (ref ${ref}). The reason is in: docker compose logs web | grep ${ref}`,
+    }
   }
   await notifyGateway()
   revalidatePath('/keys')
