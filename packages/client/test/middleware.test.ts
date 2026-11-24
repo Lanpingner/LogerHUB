@@ -320,6 +320,22 @@ test('a double end() does not move the mark or go negative', async () => {
   expect(http.server_ms).toBeGreaterThanOrEqual(0)
 })
 
+test('the first-byte mark is set once: a gap between first byte and end lands in transit', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/gap').expect(200)
+  const http = (await entries())[0].meta.http
+  expect(http.transit_ms).toBeGreaterThanOrEqual(20)
+  expect(http.server_ms).toBeLessThan(15)
+})
+
+test('a late second end() does not move the mark', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/double-end-gap').expect(200)
+  const http = (await entries())[0].meta.http
+  expect(http.server_ms).toBeLessThan(15)
+  expect(http.transit_ms).toBeGreaterThanOrEqual(0)
+})
+
 test('an explicit writeHead with no body still marks the first byte', async () => {
   const { app, entries } = await appWith({})
   await request(app).get('/head-only').expect(204)

@@ -93,6 +93,20 @@ export async function appWith(
     res.writeHead(204)
     res.end()
   })
+  app.get('/gap', (_req, res) => {
+    res.write('a')
+    setTimeout(() => res.end('b'), 25)
+  })
+  app.get('/double-end-gap', (_req, res) => {
+    res.on('error', () => {})
+    res.setHeader('Content-Type', 'application/json')
+    res.end('{"a":1}')
+    // Blocks the loop so 'finish' cannot fire between the two calls: the second end() lands
+    // before the line is emitted, which is the only case where moving the mark would show.
+    const until = Date.now() + 25
+    while (Date.now() < until);
+    res.end('{"a":2}')
+  })
   app.get('/health', (_req, res) => void res.send('ok'))
   app.get('/boom', (_req, res) => void res.status(500).json({ error: 'boom' }))
   app.get('/throws', () => {
