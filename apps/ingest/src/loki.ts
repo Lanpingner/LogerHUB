@@ -38,6 +38,11 @@ function structuredMetadata(e: LogEntry, extra: string[]): Record<string, string
 
 function line(e: LogEntry): string {
   const body: Record<string, unknown> = { msg: e.msg }
+  // Dimensions go in the line as well as in structured metadata: Loki does not
+  // return metadata in query_range values by default, so a reader would
+  // otherwise see rows with no company or user.
+  if (e.dims && Object.keys(e.dims).length) body.dims = e.dims
+  if (e.kind) body.kind = e.kind
   if (e.meta) for (const [k, v] of Object.entries(e.meta)) body[k] = v
   let s = JSON.stringify(body)
   if (Buffer.byteLength(s) > LOKI_LIMITS.maxLineBytes) {
