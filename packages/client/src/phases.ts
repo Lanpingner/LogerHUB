@@ -23,7 +23,7 @@ function record(map: Map<string, number>, name: unknown, startedAt: bigint): voi
     const ms = Number(process.hrtime.bigint() - startedAt) / 1e6
     map.set(key, (map.get(key) ?? 0) + ms)
   } catch {
-    // dropped
+    // a lost sample is the right failure: the request must not notice timing broke
   }
 }
 
@@ -36,8 +36,9 @@ function isThenable(v: unknown): v is PromiseLike<unknown> {
 }
 
 /**
- * Returns `fn`'s own value, so a sync caller gets a sync result and a promise keeps its identity.
- * Recording rides a side branch on the promise; it never replaces what the caller awaits.
+ * Returns `fn`'s own value, so a sync caller gets a sync result and a native promise keeps its identity.
+ * Any other thenable is adopted exactly once: lazy ones (query builders) start work in then(), so
+ * calling it a second time to observe settlement would run the query twice.
  */
 export function timePhase<T>(name: string, fn: () => T): T {
   const map = store.getStore()
@@ -50,16 +51,18 @@ export function timePhase<T>(name: string, fn: () => T): T {
     record(map, name, startedAt)
     throw err
   }
-  if (isThenable(result)) {
+  if (result instanceof Promise) {
     // Both arms record and swallow, so the branch itself can never become an unhandled rejection.
-    try {
-      result.then(() => record(map, name, startedAt), () => record(map, name, startedAt))
-    } catch {
-      // a thenable whose then() throws is the caller's problem, not ours
-    }
-  } else {
-    record(map, name, startedAt)
+    result.then(() => record(map, name, startedAt), () => record(map, name, startedAt))
+    return result
   }
+  if (isThenable(result)) {
+    return Promise.resolve(result).then(
+      (v) => { record(map, name, startedAt); return v },
+      (e) => { record(map, name, startedAt); throw e },
+    ) as T
+  }
+  record(map, name, startedAt)
   return result
 }
 

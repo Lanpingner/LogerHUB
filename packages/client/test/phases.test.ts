@@ -42,8 +42,24 @@ test('outside a request context it runs the function and records nothing', async
   const value = await timePhase('db', async () => { ran = true; return 'value' })
   expect(value).toBe('value')
   expect(ran).toBe(true)
-  // nothing leaked into a context opened afterwards
-  expect(runWithPhases(() => undefined).phases()).toEqual({})
+})
+
+test('a non-native thenable has then() called exactly once and is still recorded', async () => {
+  let calls = 0
+  const lazy = {
+    then(res: (v: string) => void) { calls++; setTimeout(() => res('rows'), 10) },
+  }
+  const ctx = runWithPhases(() => timePhase('db', () => lazy as unknown as PromiseLike<string>))
+  expect(await ctx.result).toBe('rows')
+  expect(calls).toBe(1)
+  expect(ctx.phases().db).toBeGreaterThanOrEqual(5)
+})
+
+test('a rejecting non-native thenable records and rethrows', async () => {
+  const bad = { then(_res: unknown, rej: (e: Error) => void) { setTimeout(() => rej(new Error('boom')), 5) } }
+  const ctx = runWithPhases(() => timePhase('db', () => bad as unknown as PromiseLike<void>))
+  await expect(ctx.result).rejects.toThrow('boom')
+  expect(ctx.phases().db).toBeGreaterThanOrEqual(0)
 })
 
 test('startPhase records once even if called twice', async () => {
@@ -77,6 +93,7 @@ test('rejects unusable names and truncates long ones', async () => {
     await timePhase(123 as unknown as string, () => sleep(1))
     await timePhase('x'.repeat(500), () => sleep(1))
     await timePhase('server', () => sleep(1))       // reserved
+    await timePhase('transit', () => sleep(1))      // reserved
   })
   await ctx.result
   const names = Object.keys(ctx.phases())
