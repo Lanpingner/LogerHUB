@@ -73,6 +73,31 @@ export async function activeOperator(): Promise<{ email: string } | null> {
   return { email: session.email }
 }
 
+export type Gate =
+  | { state: 'anonymous' }
+  | { state: 'must-change'; email: string }
+  | { state: 'active'; email: string }
+
+/**
+ * What the root layout should render. One function rather than an expression in
+ * the layout, because the safe default is not the obvious one:
+ * `operatorByEmail()` returns undefined both for a deleted account and for a
+ * read it could not perform, and `undefined?.must_change_password === 1` is
+ * false — so written inline, a transient database error would open the console
+ * to an account that has not set a password yet.
+ *
+ * Anything it cannot positively confirm is `must-change`: a screen that asks for
+ * a password it cannot verify is a dead end, which is the right failure.
+ */
+export async function operatorGate(): Promise<Gate> {
+  const session = await currentOperator()
+  if (!session) return { state: 'anonymous' }
+  const row = operatorByEmail(session.email)
+  if (!row) return { state: 'must-change', email: session.email }
+  if (row.must_change_password === 1) return { state: 'must-change', email: session.email }
+  return { state: 'active', email: session.email }
+}
+
 export async function login(email: string, password: string): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!SECRET) return { ok: false, error: 'SESSION_SECRET is not set on the server.' }
   const operator = operatorByEmail(email)

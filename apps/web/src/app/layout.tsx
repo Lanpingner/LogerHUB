@@ -1,8 +1,7 @@
 import './globals.css'
 import type { ReactNode } from 'react'
 import { IBM_Plex_Sans, JetBrains_Mono } from 'next/font/google'
-import { currentOperator } from '../lib/auth'
-import { operatorByEmail } from '../lib/store'
+import { operatorGate } from '../lib/auth'
 import { MIN_PASSWORD_LENGTH } from '../lib/password'
 import { ChangePassword } from '../components/ChangePassword'
 import { Providers } from './providers'
@@ -34,18 +33,18 @@ export const metadata = {
 }
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const operator = await currentOperator()
-  // Checked here rather than per page: a forced change has to be unavoidable, and
-  // anything that lists routes to protect eventually misses one.
-  const mustChange = operator ? operatorByEmail(operator.email)?.must_change_password === 1 : false
+  // Decided in one place, and fails closed: see operatorGate. Checked here rather
+  // than per page because a forced change has to be unavoidable, and anything
+  // that lists routes to protect eventually misses one.
+  const gate = await operatorGate()
   return (
     <html lang="en" className={sans.variable + ' ' + mono.variable}>
       <body>
         <Providers>
-          {operator && mustChange ? (
-            <ChangePassword email={operator.email} forced minLength={MIN_PASSWORD_LENGTH} />
-          ) : operator ? (
-            <ApplicationShell email={operator.email}>{children}</ApplicationShell>
+          {gate.state === 'must-change' ? (
+            <ChangePassword email={gate.email} forced minLength={MIN_PASSWORD_LENGTH} />
+          ) : gate.state === 'active' ? (
+            <ApplicationShell email={gate.email}>{children}</ApplicationShell>
           ) : (
             children
           )}
