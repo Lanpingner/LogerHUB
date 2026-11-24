@@ -33,10 +33,20 @@ terminated by your own reverse proxy; a ready nginx config is included.
 
 ```bash
 git clone <this repo> && cd Logguber
-cp .env.example .env
+make env        # copies .env.example and fills in both secrets
 ```
 
-Fill in `.env`. **It is gitignored and must stay that way** — it holds the two
+`make env` never touches an existing `.env`, so it is safe to run twice. By hand
+it is:
+
+```bash
+cp .env.example .env
+sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$(openssl rand -hex 32)|" .env
+sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$(openssl rand -hex 32)|" .env
+chmod 600 .env
+```
+
+Then check the rest of `.env`. **It is gitignored and must stay that way** — it holds the two
 secrets, and `SESSION_SECRET` is enough on its own to forge an operator session
 cookie and read every log in the console:
 

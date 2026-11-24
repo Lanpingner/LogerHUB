@@ -24,7 +24,7 @@ PLATFORM   ?= linux/amd64
 # them. Override on the command line: `make build TAG=release`.
 export REGISTRY PROJECT TAG
 
-.PHONY: help build push release pull deploy logs down verify
+.PHONY: help env build push release pull deploy logs down verify
 .DEFAULT_GOAL := help
 
 help:
@@ -37,11 +37,26 @@ help:
 	@echo '    make release         build + push, tagged `release`'
 	@echo ''
 	@echo '  On the server:'
+	@echo '    make env             create .env with fresh secrets (once)'
 	@echo '    make pull            pull the images, no build'
 	@echo '    make deploy          pull, then restart the stack'
 	@echo '    make logs            follow the gateway and console logs'
 	@echo ''
 	@echo '  TAG=$(TAG)  REGISTRY=$(REGISTRY)  PROJECT=$(PROJECT)'
+
+# Never touches an existing .env: those secrets sign operator sessions and the
+# console's calls to the gateway, so regenerating them silently would log
+# everyone out and break that pair.
+env:
+	@if [ -e .env ]; then \
+		echo '.env already exists — leaving it alone.'; \
+	else \
+		cp .env.example .env && \
+		sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$$(openssl rand -hex 32)|" .env && \
+		sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$$(openssl rand -hex 32)|" .env && \
+		chmod 600 .env && \
+		echo '.env created with fresh secrets. Check INGEST_BIND and WEB_BIND before deploying.'; \
+	fi
 
 build:
 	DOCKER_DEFAULT_PLATFORM=$(PLATFORM) docker compose build ingest web
