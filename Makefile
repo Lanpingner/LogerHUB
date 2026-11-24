@@ -51,10 +51,16 @@ env:
 	@if [ -e .env ]; then \
 		echo '.env already exists — leaving it alone.'; \
 	else \
-		cp .env.example .env && \
-		sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$$(openssl rand -hex 32)|" .env && \
-		sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$$(openssl rand -hex 32)|" .env && \
-		chmod 600 .env && \
+		command -v openssl >/dev/null 2>&1 || { echo 'openssl is not installed; .env not created.' >&2; exit 1; }; \
+		cs=$$(openssl rand -hex 32); ss=$$(openssl rand -hex 32); \
+		case "$$cs$$ss" in *[!0-9a-f]*|"") echo 'openssl produced no usable secret; .env not created.' >&2; exit 1;; esac; \
+		[ $${#cs} -ge 32 ] && [ $${#ss} -ge 32 ] || { echo 'openssl produced a short secret; .env not created.' >&2; exit 1; }; \
+		umask 077 && cp .env.example .env.new && \
+		sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$$cs|" .env.new && \
+		sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$$ss|" .env.new && \
+		grep -q "^CONSOLE_SECRET=$$cs$$" .env.new && grep -q "^SESSION_SECRET=$$ss$$" .env.new || \
+			{ echo 'the secrets were not written; .env not created (see .env.new).' >&2; exit 1; }; \
+		mv .env.new .env && \
 		echo '.env created with fresh secrets. Check INGEST_BIND and WEB_BIND before deploying.'; \
 	fi
 

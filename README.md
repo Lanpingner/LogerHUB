@@ -36,14 +36,18 @@ git clone <this repo> && cd Logguber
 make env        # copies .env.example and fills in both secrets
 ```
 
-`make env` never touches an existing `.env`, so it is safe to run twice. By hand
-it is:
+`make env` never touches an existing `.env`, so it is safe to run twice. It also
+refuses to write anything if `openssl` is missing or fails — an empty
+`SESSION_SECRET` would stop every login rather than announce itself — and builds
+the file under `umask 077`, so the secrets are never briefly world-readable.
+
+By hand, with the same two properties:
 
 ```bash
-cp .env.example .env
-sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$(openssl rand -hex 32)|" .env
-sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$(openssl rand -hex 32)|" .env
-chmod 600 .env
+cs=$(openssl rand -hex 32) && ss=$(openssl rand -hex 32) && [ -n "$cs" ] && [ -n "$ss" ] || echo 'openssl failed'
+( umask 077 && cp .env.example .env.new )
+sed -i "s|^CONSOLE_SECRET=.*|CONSOLE_SECRET=$cs|; s|^SESSION_SECRET=.*|SESSION_SECRET=$ss|" .env.new
+mv .env.new .env
 ```
 
 Then check the rest of `.env`. **It is gitignored and must stay that way** — it holds the two
