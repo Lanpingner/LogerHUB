@@ -1,3 +1,8 @@
+# The same .env docker compose reads, so `make verify` checks the ports the
+# stack is actually bound to rather than the defaults.
+-include .env
+export
+
 REGISTRY   := registry.leviathan.systems
 PROJECT    := logerhub
 TAG        ?= latest
@@ -51,8 +56,8 @@ deploy: pull
 
 verify:
 	@sleep 5
-	@printf 'ingest  '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$${INGEST_BIND:-127.0.0.1:8080}/health || echo 'unreachable'
-	@printf 'console '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$${WEB_BIND:-127.0.0.1:3000}/login || echo 'unreachable'
+	@printf 'ingest  '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$(or $(INGEST_BIND),127.0.0.1:8080)/health || echo 'unreachable'
+	@printf 'console '; curl -fsS -o /dev/null -w '%{http_code}\n' http://$(or $(WEB_BIND),127.0.0.1:3000)/login || echo 'unreachable'
 
 logs:
 	docker compose logs -f ingest web
