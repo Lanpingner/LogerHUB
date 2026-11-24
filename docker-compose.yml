@@ -19,10 +19,15 @@ services:
       LOKI_URL: http://loki:3100
       LOGGUBER_DB: /data/logguber.db
       CONSOLE_SECRET: ${CONSOLE_SECRET:?set CONSOLE_SECRET in .env}
-      # Behind one reverse proxy (Caddy below). Raise if you add Cloudflare or nginx.
-      TRUSTED_PROXY_HOPS: '1'
+      # How many proxies sit in front. One reverse proxy (nginx or the optional
+      # Caddy) is 1; add one for each additional hop, such as Cloudflare. The
+      # per-key IP allowlist is only as correct as this number.
+      TRUSTED_PROXY_HOPS: '${TRUSTED_PROXY_HOPS:-1}'
     volumes:
       - store:/data
+    # Loopback only: your reverse proxy reaches this, the internet does not.
+    ports:
+      - '${INGEST_BIND:-127.0.0.1:8080}:8080'
     depends_on:
       - loki
     restart: unless-stopped
@@ -42,11 +47,16 @@ services:
       # Same file as the gateway: SQLite needs a shared filesystem, which is why
       # these two services must stay on one host.
       - store:/data
+    ports:
+      - '${WEB_BIND:-127.0.0.1:3000}:3000'
     depends_on:
       - ingest
     restart: unless-stopped
 
+  # Optional: only starts with `--profile tls`. Leave it out when your own
+  # reverse proxy terminates TLS; see deploy/nginx.conf.
   caddy:
+    profiles: ['tls']
     image: caddy:2
     ports:
       - '80:80'

@@ -28,31 +28,53 @@ Four parts:
 
 ## Deploy it
 
-One server runs everything: Loki, the ingest gateway, the console and Caddy for
-TLS. Needs Docker and a domain pointing at the box.
+One server runs everything: Loki, the ingest gateway and the console. TLS is
+terminated by your own reverse proxy; a ready nginx config is included.
 
 ```bash
 git clone <this repo> && cd Logguber
 cp .env.example .env
 ```
 
-Fill in `.env` — both secrets must be long random strings:
+Fill in `.env`:
 
 ```bash
 CONSOLE_SECRET=$(openssl rand -hex 32)   # console to gateway, internal only
 SESSION_SECRET=$(openssl rand -hex 32)   # signs the operator's session cookie
-LOGGUBER_DOMAIN=logs.example.com         # Caddy gets a certificate for this
+TRUSTED_PROXY_HOPS=1                     # your nginx; add one per extra hop
+INGEST_BIND=127.0.0.1:8080               # change if the port is taken
+WEB_BIND=127.0.0.1:3000
 ```
-
-Then:
 
 ```bash
 docker compose up -d --build
 ```
 
-Caddy is the only service with published ports (80 and 443). Loki, the gateway
-and the console are reachable only from inside the compose network, and
-`/internal/*` is refused from outside.
+The containers publish to **loopback only** — nothing is exposed to the
+internet until your proxy forwards to them.
+
+Then point nginx at them. Copy `deploy/nginx.conf`, change `server_name` and
+the certificate paths, and reload:
+
+```bash
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/logerhub
+sudo ln -s /etc/nginx/sites-available/logerhub /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Three parts of that config are load-bearing, and the usual symptoms if they are
+missing:
+
+| Location | What it needs | If it is missing |
+|---|---|---|
+| `/v1/stream` | `Upgrade`/`Connection` headers, `proxy_read_timeout 3600s` | Your services reconnect every 60 seconds, forever |
+| `/api/live` | `proxy_buffering off`, `gzip off` | Live tail shows nothing and looks broken |
+| everything | `X-Forwarded-For` via `$proxy_add_x_forwarded_for` | Per-key IP allowlists match the proxy, not the caller |
+
+`TRUSTED_PROXY_HOPS` must equal the number of proxies in front. One nginx is
+`1`; nginx behind Cloudflare is `2`. The gateway reads the client address that
+many entries from the right of `X-Forwarded-For`, so a wrong number means the
+IP allowlist checks the wrong address.
 
 Create your login and one key per service:
 
@@ -64,8 +86,19 @@ docker compose exec -e LOGGUBER_DB=/data/logguber.db ingest \
   node --experimental-strip-types apps/ingest/src/seed.ts key office-api office-api prod
 ```
 
-Each key's secret prints once; only its hash is stored. Repeat for each service.
-Open your domain and sign in.
+Each key's secret prints once; only its hash is stored. Repeat per service.
+
+### If you would rather not run a proxy
+
+Caddy is included and will get certificates automatically:
+
+```bash
+echo 'LOGGUBER_DOMAIN=logs.example.com' >> .env
+docker compose --profile tls up -d
+```
+
+It publishes 80 and 443 and handles everything above for you. Skip it entirely
+when your own nginx is in front — it is off by default.
 
 ### What runs where
 
