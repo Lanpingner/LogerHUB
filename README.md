@@ -204,6 +204,37 @@ pnpm --filter @logguber/web dev        # console on 3000
 node traffic.mjs                       # optional: simulated traffic
 ```
 
+### Two package managers, on purpose
+
+Development installs with **pnpm**; the Docker images install with **npm**, which
+ships inside the node image and so needs nothing downloaded before the install
+can start.
+
+There is one source of truth for dependency *ranges*: workspace siblings are
+declared as a plain `*`, because npm rejects `workspace:*` outright
+(`EUNSUPPORTEDPROTOCOL`), and `linkWorkspacePackages: true` in
+`pnpm-workspace.yaml` makes pnpm resolve `*` to the local package instead of
+fetching it from the registry. The root manifest carries the `workspaces` field
+npm needs; pnpm reads the yaml and ignores it.
+
+Only the lockfiles differ, so **after changing any dependency, regenerate both**:
+
+```bash
+node scripts/relock.mjs     # then: pnpm test
+```
+
+`pnpm test` fails if the two disagree in a way that matters, so forgetting this
+is caught rather than shipped. One divergence is expected and allowed: pnpm 11
+holds back packages published in the last day or two as supply-chain protection
+and npm has no equivalent, so npm sits a patch ahead on a few packages. What the
+check refuses is npm resolving something **older** than the tests use, or more
+than `COOLDOWN_ALLOWANCE` packages differing — both mean a manifest changed and
+only one lockfile was regenerated.
+
+That lag is the real cost of this split, and it points the wrong way: the images
+can install a release pnpm is still holding back. `deploy/*.Dockerfile` carries
+the same note.
+
 ### In your Express service
 
 ```js
