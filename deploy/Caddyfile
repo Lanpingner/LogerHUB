@@ -1,0 +1,23 @@
+# The only service with published ports. Terminates TLS and forwards to the
+# gateway and the console, including WebSocket upgrades.
+{$LOGGUBER_DOMAIN} {
+	# Log ingest: the persistent WebSocket your services connect to.
+	@ingest path /v1/stream /v1/logs /health
+	handle @ingest {
+		reverse_proxy ingest:8080
+	}
+
+	# The gateway's internal endpoints are never reachable from outside.
+	@internal path /internal/*
+	handle @internal {
+		respond 404
+	}
+
+	# Everything else is the console.
+	handle {
+		reverse_proxy web:3000 {
+			# Live tail is server-sent events; never buffer it.
+			flush_interval -1
+		}
+	}
+}

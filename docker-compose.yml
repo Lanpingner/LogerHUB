@@ -1,0 +1,69 @@
+services:
+  loki:
+    image: grafana/loki:3.7.5
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./deploy/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    # Not published: only the gateway and the console talk to Loki.
+    expose:
+      - '3100'
+    restart: unless-stopped
+
+  ingest:
+    build:
+      context: .
+      dockerfile: deploy/ingest.Dockerfile
+    environment:
+      PORT: '8080'
+      LOKI_URL: http://loki:3100
+      LOGGUBER_DB: /data/logguber.db
+      CONSOLE_SECRET: ${CONSOLE_SECRET:?set CONSOLE_SECRET in .env}
+      # Behind one reverse proxy (Caddy below). Raise if you add Cloudflare or nginx.
+      TRUSTED_PROXY_HOPS: '1'
+    volumes:
+      - store:/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    environment:
+      LOKI_URL: http://loki:3100
+      LOGGUBER_DB: /data/logguber.db
+      INGEST_INTERNAL_URL: http://ingest:8080
+      CONSOLE_SECRET: ${CONSOLE_SECRET:?set CONSOLE_SECRET in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      NODE_ENV: production
+    volumes:
+      # Same file as the gateway: SQLite needs a shared filesystem, which is why
+      # these two services must stay on one host.
+      - store:/data
+    depends_on:
+      - ingest
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      LOGGUBER_DOMAIN: ${LOGGUBER_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - ingest
+      - web
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+  store:
+  caddy-data:
+  caddy-config:

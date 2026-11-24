@@ -79,7 +79,9 @@ console.log('gateway up')
 
 // Subscribe to live tail before logging, so we can prove fan-out is immediate.
 const liveSeen = []
-const liveRes = await fetch('http://127.0.0.1:' + GW_PORT + '/internal/live?secret=' + SECRET)
+const liveRes = await fetch('http://127.0.0.1:' + GW_PORT + '/internal/live', {
+  headers: { 'x-console-secret': SECRET },
+})
 const reader = liveRes.body.getReader()
 void (async () => {
   const dec = new TextDecoder()

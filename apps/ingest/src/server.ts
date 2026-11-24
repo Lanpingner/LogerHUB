@@ -3,6 +3,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { HELLO_DEFAULTS, LEVELS, LOKI_LIMITS, type BatchFrame, type LogEntry } from '@logguber/shared'
 import { openStore, type Store } from './store.ts'
 import { clientIp, ipAllowed, parseKey, secretMatches } from './auth.ts'
+import { timingSafeEqual } from 'node:crypto'
 import { pushToLoki } from './loki.ts'
 import { createBus, type Filter, type LiveEntry } from './bus.ts'
 import { rollupRows } from './rollup.ts'
@@ -20,6 +21,15 @@ const levelSet = new Set<string>(LEVELS)
 
 // Live connections per key, so revoking a key can close its open sockets.
 const liveByKeyId = new Map<string, Set<WebSocket>>()
+
+/** Constant-time compare for the console's shared secret. Never accepted from a
+ *  query string: URLs land in proxy and access logs. */
+function consoleSecretOk(header: string | string[] | undefined): boolean {
+  if (!CONSOLE_SECRET || typeof header !== 'string') return false
+  const a = Buffer.from(header)
+  const b = Buffer.from(CONSOLE_SECRET)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
 
 function log(msg: string, extra?: Record<string, unknown>) {
   // The gateway never logs into itself — stdout only, no feedback loop.
@@ -196,7 +206,7 @@ const server = createServer((req, res) => {
 
   // Live stream for the console: SSE, authenticated with a shared secret.
   if (url.pathname === '/internal/live') {
-    if (!CONSOLE_SECRET || url.searchParams.get('secret') !== CONSOLE_SECRET) {
+    if (!consoleSecretOk(req.headers['x-console-secret'])) {
       return json(res, 401, { error: 'unauthorised' })
     }
     const filter = parseFilter(url)
@@ -216,7 +226,7 @@ const server = createServer((req, res) => {
   // Tell the gateway a key changed, so a revoked key's open sockets close now
   // rather than at the next handshake.
   if (url.pathname === '/internal/reload' && req.method === 'POST') {
-    if (!CONSOLE_SECRET || req.headers['x-console-secret'] !== CONSOLE_SECRET) {
+    if (!consoleSecretOk(req.headers['x-console-secret'])) {
       return json(res, 401, { error: 'unauthorised' })
     }
     let closed = 0
