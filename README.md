@@ -199,10 +199,13 @@ you knowingly run it without TLS on a trusted network:
 ```bash
 echo 'COOKIE_INSECURE=1' >> .env
 docker compose up -d --force-recreate web
+docker compose exec web printenv COOKIE_INSECURE   # must print 1
 ```
 
 That sends the session cookie in clear text, so it is only reasonable where
-nothing untrusted can see the traffic.
+nothing untrusted can see the traffic. The `printenv` check is worth doing: only
+variables named in a service's `environment:` block reach the container, so a
+new one added to `.env` alone silently does nothing.
 
 ### If the build stalls
 
