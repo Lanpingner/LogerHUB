@@ -84,7 +84,7 @@ function log(msg: string, extra?: Record<string, unknown>) {
   process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), msg, ...extra }) + '\n')
 }
 
-interface Conn { keyId: string; service: string; env: string }
+interface Conn { keyId: string; service: string; env: string; ip: string }
 
 function validate(entries: unknown): { ok: LogEntry[]; rejected: number } {
   if (!Array.isArray(entries)) return { ok: [], rejected: 0 }
@@ -162,10 +162,14 @@ async function handleBatch(conn: Conn, frame: BatchFrame): Promise<{ ok: true } 
   // Fan out before storage: live tail must not wait on Loki. This is the one
   // step that is allowed to happen for a batch that later fails to store —
   // the tail is best-effort by design, and Loki holds the durable copy.
-  bus.publish(entries.map((e) => ({ ...e, service: conn.service, env: conn.env })) as LiveEntry[])
+  bus.publish(entries.map((e) => ({ ...e, service: conn.service, env: conn.env, source_ip: conn.ip })) as LiveEntry[])
 
   try {
-    await pushToLoki(entries, conn.service, conn.env, { url: LOKI_URL, metadataKeys: levels.filter((l) => l !== 'service') })
+    await pushToLoki(entries, conn.service, conn.env, {
+      url: LOKI_URL,
+      metadataKeys: levels.filter((l) => l !== 'service'),
+      sourceIp: conn.ip,
+    })
   } catch (e) {
     // Hand the id back so the client's retry is treated as a retry.
     store.releaseBatch(frame.id, conn.keyId)
@@ -238,7 +242,9 @@ function authorise(req: IncomingMessage, url: URL): { conn: Conn } | { close: nu
   if (key.env_scope && !key.env_scope.includes(env)) return { close: 4403, why: 'env out of scope' }
 
   store.touchKey(key.id, ip)
-  return { conn: { keyId: key.key_id, service, env } }
+  // Carried on the connection, not re-read per batch: the address is resolved
+  // once, here, where the allowlist already decided it is trustworthy.
+  return { conn: { keyId: key.key_id, service, env, ip } }
 }
 
 // Without maxPayload, ws defaults to 100 MB — a hundred times what the hello

@@ -17,6 +17,9 @@ export interface LogRow {
   requestId?: string
   traceId?: string
   instance?: string
+  /** The address the gateway saw the batch arrive from. Observed server-side,
+   *  never sent by the client, so it is the one field a sender cannot shape. */
+  sourceIp?: string
   msg: string
   payload: Record<string, unknown> | null
 }

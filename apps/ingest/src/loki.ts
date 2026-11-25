@@ -5,12 +5,20 @@ export interface LokiPushOptions {
   url: string
   /** Fields promoted from an entry's dims/meta into structured metadata. */
   metadataKeys: string[]
+  /** The address the batch arrived from, as the gateway resolved it. Stamped on
+   *  every entry: the sender cannot set it, and it is the only record of where a
+   *  line actually came from once the connection is gone. */
+  sourceIp?: string
 }
 
 const METADATA_FROM_META = ['method', 'route', 'status', 'duration_ms', 'request_id'] as const
 
-function structuredMetadata(e: LogEntry, extra: string[]): Record<string, string> {
+function structuredMetadata(e: LogEntry, extra: string[], sourceIp?: string): Record<string, string> {
   const out: Record<string, string> = {}
+  // First, so it survives the metadata ceilings below: a sender can push the
+  // count over the limit with its own dims, and the gateway's own observation is
+  // the one entry that must not be the casualty.
+  if (sourceIp) out.source_ip = sourceIp
   for (const k of extra) {
     const v = e.dims?.[k]
     if (typeof v === 'string' && v) out[k] = v
@@ -36,7 +44,7 @@ function structuredMetadata(e: LogEntry, extra: string[]): Record<string, string
   return out
 }
 
-function line(e: LogEntry): string {
+function line(e: LogEntry, sourceIp?: string): string {
   const body: Record<string, unknown> = {}
   // The sender's payload is spread FIRST, then the validated fields are written
   // over it. The other order let a sender's `meta.msg` or `meta.dims` replace the
@@ -50,6 +58,10 @@ function line(e: LogEntry): string {
     }
   }
   body.msg = e.msg
+  // Underscored, so the loop above cannot carry a forged one: the sender's keys
+  // beginning with `_` are dropped. In the line as well as in metadata because
+  // Loki does not return structured metadata from query_range by default.
+  if (sourceIp) body._source_ip = sourceIp
   // Dimensions go in the line as well as in structured metadata: Loki does not
   // return metadata in query_range values by default, so a reader would
   // otherwise see rows with no company or user.
@@ -57,7 +69,12 @@ function line(e: LogEntry): string {
   if (e.kind) body.kind = e.kind
   let s = JSON.stringify(body)
   if (Buffer.byteLength(s) > LOKI_LIMITS.maxLineBytes) {
-    s = JSON.stringify({ msg: e.msg, _line_truncated: true, _bytes: Buffer.byteLength(s) })
+    s = JSON.stringify({
+      msg: e.msg,
+      _line_truncated: true,
+      _bytes: Buffer.byteLength(s),
+      ...(sourceIp ? { _source_ip: sourceIp } : {}),
+    })
   }
   return s
 }
@@ -79,7 +96,7 @@ export async function pushToLoki(
       streams.set(key, s)
     }
     const ns = String(BigInt(Date.parse(e.ts) || Date.now()) * 1000000n)
-    s.values.push([ns, line(e), structuredMetadata(e, opts.metadataKeys)])
+    s.values.push([ns, line(e, opts.sourceIp), structuredMetadata(e, opts.metadataKeys, opts.sourceIp)])
   }
 
   const res = await fetch(`${opts.url.replace(/\/$/, '')}/loki/api/v1/push`, {

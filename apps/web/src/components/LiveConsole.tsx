@@ -51,6 +51,7 @@ interface LiveEntry {
   env: string
   dims?: Record<string, string>
   meta?: Record<string, unknown>
+  source_ip?: string
 }
 
 function toRow(e: LiveEntry, seq: number): LogRow {
@@ -77,8 +78,11 @@ function toRow(e: LiveEntry, seq: number): LogRow {
     requestId: http.request_id as string | undefined,
     traceId: e.dims?.trace_id,
     instance: e.dims?.instance,
+    sourceIp: e.source_ip,
     msg: e.msg,
-    payload: { msg: e.msg, ...(e.meta ?? {}) },
+    // `_source_ip` matches what the stored line carries, so the Raw JSON tab
+    // reads the same for a live row and the same row fetched back from Loki.
+    payload: { msg: e.msg, ...(e.meta ?? {}), ...(e.source_ip ? { _source_ip: e.source_ip } : {}) },
   }
 }
 

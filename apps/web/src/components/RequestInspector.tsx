@@ -270,6 +270,7 @@ export const RequestInspector = memo(function RequestInspector({
             <Field label="Service">{row.service}</Field>
             <Field label="Environment">{row.env}</Field>
             <Field label="Instance">{row.instance}</Field>
+            <Field label="Source IP">{row.sourceIp}</Field>
             <Box sx={{ height: 1, background: C.border, my: 1.5 }} />
             <Field label="Method">{row.method}</Field>
             <Field label="Route">{row.route}</Field>

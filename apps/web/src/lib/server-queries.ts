@@ -21,6 +21,9 @@ export interface LogRow {
   requestId?: string
   traceId?: string
   instance?: string
+  /** The address the gateway saw the batch arrive from. Observed server-side,
+   *  never sent by the client, so it is the one field a sender cannot shape. */
+  sourceIp?: string
   msg: string
   payload: Record<string, unknown> | null
 }
@@ -69,6 +72,9 @@ function toRow(stream: Record<string, string>, ns: string, line: string, meta: R
     requestId: pick('request_id') ?? (http.request_id as string | undefined),
     traceId: pick('trace_id'),
     instance: pick('instance'),
+    // Structured metadata first; the line copy is the fallback, because Loki
+    // does not return metadata from every query path.
+    sourceIp: meta.source_ip ?? (payload?._source_ip as string | undefined),
     msg,
     payload,
   }

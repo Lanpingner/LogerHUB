@@ -3,6 +3,8 @@ import type { LogEntry } from '@logguber/shared'
 export interface LiveEntry extends LogEntry {
   service: string
   env: string
+  /** The address the gateway resolved for the sender of this entry. */
+  source_ip?: string
 }
 
 export interface Filter {
