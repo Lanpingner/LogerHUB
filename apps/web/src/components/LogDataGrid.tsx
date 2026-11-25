@@ -2,7 +2,7 @@
 
 import Box from '@mui/material/Box'
 import { DataGrid, type GridColDef } from '@mui/x-data-grid'
-import { useMemo, type CSSProperties } from 'react'
+import { useCallback, useMemo, type CSSProperties } from 'react'
 import type { LogRow } from '../lib/types'
 import { useConsole, type ColumnKey } from '../store/console'
 import { C, MONO, levelColor, statusColor } from '../lib/tokens'
@@ -19,6 +19,32 @@ const mono = (v: unknown) => (
     {v == null || v === '' ? '—' : String(v)}
   </Box>
 )
+
+/* Hoisted out of the component: these never vary, and a new identity each
+ * render makes MUI re-serialize the whole `sx` block and re-apply the rest. */
+const getRowId = (r: LogRow) => r.id
+const getRowClassName = (p: { row: LogRow }) =>
+  (p.row.status ?? 0) >= 500 ? 'lh-row-error' : (p.row.status ?? 0) >= 400 ? 'lh-row-warn' : ''
+const GRID_LOCALE = { noRowsLabel: 'No matching logs' }
+const GRID_SLOT_PROPS = {
+  loadingOverlay: { variant: 'linear-progress' as const, noRowsVariant: 'skeleton' as const },
+}
+const GRID_SX = {
+  border: 'none',
+  fontSize: 12,
+  '--DataGrid-rowBorderColor': C.border,
+  '& .MuiDataGrid-columnHeaders': { background: C.raised },
+  '& .MuiDataGrid-columnHeader': { borderColor: C.border },
+  '& .MuiDataGrid-columnHeaderTitle': { fontSize: 11, fontWeight: 500, color: C.text2 },
+  '& .MuiDataGrid-cell': { borderColor: C.border, px: 1.5, outline: 'none !important' },
+  '& .MuiDataGrid-row': { cursor: 'pointer' },
+  '& .MuiDataGrid-row:hover': { background: C.raised },
+  '& .MuiDataGrid-row.Mui-selected': { background: C.selected },
+  '& .MuiDataGrid-row.Mui-selected:hover': { background: C.selected },
+  '& .MuiDataGrid-filler': { display: 'none' },
+  '& .MuiDataGrid-scrollbarFiller': { background: C.raised },
+  '& .MuiDataGrid-overlay': { background: 'transparent', color: C.muted, fontSize: 12 },
+}
 
 /** Dense, virtualized log table. Columns are driven by the persisted store so
  *  show/hide and width survive a reload. */
@@ -121,40 +147,33 @@ export function LogDataGrid({
 
   const columns = useMemo(() => visible.map((k) => all[k]).filter(Boolean), [visible, all])
 
+  // A fresh object here is a new prop identity on every render, and the live
+  // view re-renders as lines arrive. The selection model mattered most: it was
+  // rebuilt — Set and all — on every render, but only once a row was selected,
+  // so the grid got slower at exactly the moment a log was opened.
+  const rowSelectionModel = useMemo(
+    () => (selectedId ? { type: 'include' as const, ids: new Set([selectedId]) } : undefined),
+    [selectedId],
+  )
+  const onRowClick = useCallback((p: { row: LogRow }) => onSelect(p.row), [onSelect])
+
   return (
     <DataGrid
       rows={rows}
       columns={columns}
       loading={loading}
-      getRowId={(r) => r.id}
+      getRowId={getRowId}
       rowHeight={30}
       columnHeaderHeight={30}
       hideFooter
       disableColumnMenu
       disableRowSelectionOnClick={false}
-      onRowClick={(p) => onSelect(p.row)}
-      rowSelectionModel={selectedId ? { type: 'include', ids: new Set([selectedId]) } : undefined}
-      localeText={{ noRowsLabel: 'No matching logs' }}
-      sx={{
-        border: 'none',
-        fontSize: 12,
-        '--DataGrid-rowBorderColor': C.border,
-        '& .MuiDataGrid-columnHeaders': { background: C.raised },
-        '& .MuiDataGrid-columnHeader': { borderColor: C.border },
-        '& .MuiDataGrid-columnHeaderTitle': { fontSize: 11, fontWeight: 500, color: C.text2 },
-        '& .MuiDataGrid-cell': { borderColor: C.border, px: 1.5, outline: 'none !important' },
-        '& .MuiDataGrid-row': { cursor: 'pointer' },
-        '& .MuiDataGrid-row:hover': { background: C.raised },
-        '& .MuiDataGrid-row.Mui-selected': { background: C.selected },
-        '& .MuiDataGrid-row.Mui-selected:hover': { background: C.selected },
-        '& .MuiDataGrid-filler': { display: 'none' },
-        '& .MuiDataGrid-scrollbarFiller': { background: C.raised },
-        '& .MuiDataGrid-overlay': { background: 'transparent', color: C.muted, fontSize: 12 },
-      }}
-      getRowClassName={(p) =>
-        (p.row.status ?? 0) >= 500 ? 'lh-row-error' : (p.row.status ?? 0) >= 400 ? 'lh-row-warn' : ''
-      }
-      slotProps={{ loadingOverlay: { variant: 'linear-progress', noRowsVariant: 'skeleton' } }}
+      onRowClick={onRowClick}
+      rowSelectionModel={rowSelectionModel}
+      localeText={GRID_LOCALE}
+      sx={GRID_SX}
+      getRowClassName={getRowClassName}
+      slotProps={GRID_SLOT_PROPS}
     />
   )
 }
