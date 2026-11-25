@@ -37,6 +37,10 @@ const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']
 const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx']
 const LEVELS = ['debug', 'info', 'warn', 'error', 'fatal']
 const MAX_ROWS = 2000
+/** How often buffered arrivals are applied to the view. Ten renders a second
+ *  reads as continuous to the eye and is an order of magnitude cheaper than
+ *  rendering each line. */
+const FLUSH_MS = 100
 
 interface LiveEntry {
   ts: string
@@ -109,6 +113,11 @@ export function LiveConsole() {
 
   const seq = useRef(0)
   const arrivals = useRef(0)
+  /** Lines that have arrived since the last flush, oldest first, and the
+   *  "new lines" badge count owed to the user. Both are refs so an arrival
+   *  costs no render of its own. */
+  const waiting = useRef<LogRow[]>([])
+  const waitingCount = useRef(0)
   const [rate, setRate] = useState(0)
   const streamingRef = useRef(streaming)
   streamingRef.current = streaming
@@ -142,25 +151,50 @@ export function LiveConsole() {
       arrivals.current++
       // Pausing stops the view updating, never the gateway's ingestion.
       if (!streamingRef.current) {
-        setPendingCount((n) => n + 1)
+        waitingCount.current++
         return
       }
       try {
-        const row = toRow(JSON.parse(ev.data) as LiveEntry, seq.current++)
-        setRows((prev) => {
-          const next = [row, ...prev]
-          return next.length > MAX_ROWS ? next.slice(0, MAX_ROWS) : next
-        })
-        if (!autoScrollRef.current) setPendingCount((n) => n + 1)
+        waiting.current.push(toRow(JSON.parse(ev.data) as LiveEntry, seq.current++))
+        if (!autoScrollRef.current) waitingCount.current++
       } catch {
         // A malformed frame is skipped rather than breaking the stream.
       }
     }
-    return () => es.close()
+    // Arrivals are applied in batches rather than one render each. A service
+    // under load delivers hundreds of lines a second, and every render refilters
+    // the whole buffer and redraws the grid and the inspector; at FLUSH_MS the
+    // view costs the same whether 1 line or 500 arrived in that window.
+    const flush = setInterval(() => {
+      const batch = waiting.current
+      const bumped = waitingCount.current
+      if (batch.length === 0 && bumped === 0) return
+      waiting.current = []
+      waitingCount.current = 0
+      if (batch.length > 0) {
+        setRows((prev) => {
+          // The buffer is oldest-first; the view reads newest-first.
+          const next = batch.length === 1 ? [batch[0], ...prev] : batch.reverse().concat(prev)
+          return next.length > MAX_ROWS ? next.slice(0, MAX_ROWS) : next
+        })
+      }
+      if (bumped > 0) setPendingCount((n) => n + bumped)
+    }, FLUSH_MS)
+    return () => {
+      es.close()
+      clearInterval(flush)
+      waiting.current = []
+      waitingCount.current = 0
+    }
   }, [liveUrl])
 
   useEffect(() => {
-    if (streaming && autoScroll) setPendingCount(0)
+    // Resuming clears the badge, including any count buffered but not yet
+    // flushed, or the next flush would put the badge straight back.
+    if (streaming && autoScroll) {
+      waitingCount.current = 0
+      setPendingCount(0)
+    }
   }, [streaming, autoScroll])
 
   // Histogram comes from the pre-aggregated counters, so it covers the whole
