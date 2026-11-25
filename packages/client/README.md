@@ -90,6 +90,13 @@ Two layouts, both fixed (they are pinned by tests, because people read them):
 11:13:44     +0ms GET     [a1b2c3d4] /users/1 from 127.0.0.1 — pending...
 ```
 
+On request lines the duration column shows server time then transit time, `12ms+3ms`, so a slow response reads as slow code or slow delivery at a glance. Set `timing` to choose:
+
+- `timing: 'split'` (default): `12ms+3ms`. The column is wider than the original. A request with no first byte observed (aborted before any write) falls back to the total, `+15ms`, in the same column.
+- `timing: 'total'`: the original single `+15ms` layout, byte for byte, as shown above. This is the one-word way back if you compare lines against a logger with that layout.
+
+App-reported phases (`logger.time`) are not drawn on the line; read them in the gateway.
+
 The non-request label defaults to the entry script's filename, then to the service name; set `label` to override it.
 
 ### Decorating the request line

@@ -209,7 +209,7 @@ test('a request line shows the auth tag, tags, flags and note', async () => {
       }),
       note: () => 'cached key',
     },
-    { console: { enabled: true, stream: out.stream } },
+    { console: { enabled: true, stream: out.stream, timing: 'total' } },
   )
   await request(app).get('/users/1').expect(200)
   await entries()

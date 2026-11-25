@@ -145,6 +145,7 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
   // is ignored and every redraw stacks another copy of the block instead.
   const showPending = Boolean(cfg.pending) && isTty
   const file = cfg.file
+  const splitTiming = cfg.timing !== 'total'
 
   const tagLetters = cfg.authTagLetters?.length ? cfg.authTagLetters : DEFAULT_TAG_LETTERS
   const tagAlways = cfg.authTagAlways ?? DEFAULT_TAG_ALWAYS
@@ -239,7 +240,18 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     const tags = [...shown].map(([k, v]) => (v === true ? ' ' + k : ' ' + k + ':' + v)).join('')
 
     const extra = typeof http.note === 'string' && http.note !== '' ? ' (' + http.note + ')' : ''
-    const dur = (Number.isFinite(duration) ? '+' + Math.round(duration) + 'ms' : '').padStart(8)
+    const server = Number(http.server_ms)
+    const transit = Number(http.transit_ms)
+    const split =
+      splitTiming && http.server_ms != null && http.transit_ms != null &&
+      Number.isFinite(server) && Number.isFinite(transit)
+    const total = Number.isFinite(duration) ? '+' + Math.round(duration) + 'ms' : ''
+    // One width for both forms, or the method column would jump between lines and a
+    // scan down the log would stop lining up. 13 holds `30000ms+999ms`; 'total' keeps
+    // the original 8 because that layout is pinned.
+    const dur = (split ? Math.round(server) + 'ms+' + Math.round(transit) + 'ms' : total).padStart(
+      splitTiming ? 13 : 8,
+    )
     const tone = color ? statusColor(Number.isFinite(status) ? status : 200) : ''
     // The tag is built per line because its letters are painted relative to this
     // line's own colour.

@@ -45,6 +45,13 @@ export interface ConsoleConfig {
   authTagLetters?: string[]
   /** Letters always drawn as "ran, uncached" — a check that is never served from a cache. Default `['R']`. */
   authTagAlways?: string[]
+  /**
+   * Duration column on request lines. `'split'` (default) prints `12ms+3ms`, server time
+   * then transit time, and widens the column; it falls back to `+15ms` when either half is
+   * missing. `'total'` is the original pinned format, byte for byte, for anyone comparing
+   * against a logger with that layout.
+   */
+  timing?: 'split' | 'total'
   /** Test seam. */
   stream?: NodeJS.WriteStream
 }
