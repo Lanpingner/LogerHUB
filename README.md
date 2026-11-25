@@ -351,6 +351,24 @@ app.use(log.expressMiddleware({
 process.on('SIGTERM', () => log.close())
 ```
 
+### In your MCP server
+
+```js
+server.setRequestHandler(CallToolRequestSchema, log.wrapMcpTool(
+  'search_issues',
+  async (req) => doSearch(req.params.arguments),
+  { server: 'atlas-tools' },
+))
+```
+
+One `kind: 'mcp'` entry per tool call — tool, arguments, result, duration, outcome —
+with its own tabs in the inspector and `kind:mcp` / `tool:search_issues` in the query
+bar. `wrapMcpClient` records it from the other end: the tools an agent used. No MCP
+SDK is involved; it wraps your own function, so a hand-rolled server works the same.
+
+On a stdio MCP server, pass `console: { output: 'stderr' }` — stdout is the protocol
+stream.
+
 `packages/client/README.md` has the full option list, the redaction rules, and the
 body-capture modes.
 
