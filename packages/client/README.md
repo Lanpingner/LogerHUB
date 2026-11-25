@@ -130,6 +130,8 @@ app.use(log.expressMiddleware({
 
 `captureIp` is off by default, because an IP is personal data. With it on, `trustProxyHops` says how many of your own proxies to trust; the chain is read from the right, since a client can append to `x-forwarded-for`.
 
+A request is flagged `preflight` in `meta.http.flags` when it is a CORS preflight: the method is `OPTIONS` and both an `Origin` and an `Access-Control-Request-Method` header are present. A bare `OPTIONS` without them is not flagged. Preflights are counted in request totals and latency percentiles like any other request, and a `flags` array from `resolveMeta` is merged with the flag rather than replaced.
+
 ## Phase timings
 
 Every request line splits `duration_ms` into `server_ms` (until the first response byte leaves) and `transit_ms` (first byte to finish). To say where the server time went, wrap the work in `logger.time`. It needs no request object, so it works from any depth of the call stack:

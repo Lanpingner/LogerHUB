@@ -641,4 +641,66 @@ test('resolveMeta timings pass through untouched when no phase was recorded', as
   await request(app).get('/users/1').expect(200)
   expect((await entries())[0].meta.http.timings).toEqual({ auth: 7 })
 })
+
+const preflightOf = (e: any): string[] => e.meta.http.flags ?? []
+
+test('a CORS preflight is flagged', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
+  expect(preflightOf((await entries())[0])).toEqual(['preflight'])
+})
+
+test('a plain OPTIONS is not flagged', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).options('/users/1')
+  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+})
+
+test('OPTIONS with an Origin but no Access-Control-Request-Method is not flagged', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).options('/users/1').set('Origin', 'https://example.com')
+  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+})
+
+test('OPTIONS with Access-Control-Request-Method but no Origin is not flagged', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).options('/users/1').set('Access-Control-Request-Method', 'GET')
+  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+})
+
+test('a GET carrying both CORS headers is not flagged', async () => {
+  const { app, entries } = await appWith({})
+  await request(app)
+    .get('/users/1')
+    .set('Origin', 'https://example.com')
+    .set('Access-Control-Request-Method', 'GET')
+    .expect(200)
+  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+})
+
+test("an app's own flags survive alongside the preflight flag", async () => {
+  const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['ip-exc'] }) })
+  await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
+  expect(preflightOf((await entries())[0])).toEqual(['ip-exc', 'preflight'])
+})
+
+test('a preflight flag the app also supplies is not duplicated', async () => {
+  const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['preflight'] }) })
+  await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
+  expect(preflightOf((await entries())[0])).toEqual(['preflight'])
+})
+
+test("an app's flags pass through untouched when the request is not a preflight", async () => {
+  const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['ip-exc'] }) })
+  await request(app).options('/users/1')
+  expect(preflightOf((await entries())[0])).toEqual(['ip-exc'])
+})
+
+test('preflights still count as requests', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).options('/users/1').set('Origin', 'https://e.com').set('Access-Control-Request-Method', 'GET')
+  const e = (await entries())[0]
+  expect(e.kind).toBe('request')
+  expect(e.meta.http.method).toBe('OPTIONS')
+})
 })

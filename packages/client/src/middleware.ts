@@ -196,6 +196,13 @@ export function createExpressMiddleware(
         const recorded = Object.keys(phases).length > 0
         // Only app-reported phases: server/transit stay scalars (see above) or the waterfall's sum is wrong.
         if (recorded) http.timings = phases
+        // Flagged, not filtered: a preflight is real traffic and stays in counts and percentiles.
+        // Method plus both headers, because a bare OPTIONS (health probe, curl) is not one.
+        const preflight =
+          req.method === 'OPTIONS' &&
+          req.headers.origin !== undefined &&
+          req.headers['access-control-request-method'] !== undefined
+        if (preflight) http.flags = ['preflight']
         if (ip !== undefined) http.ip = ip
         if (!finished) http.aborted = true
         // Application facts last, but they cannot overwrite the measured ones: a
@@ -207,6 +214,9 @@ export function createExpressMiddleware(
           // both, recorded phases winning because they are measured and the app's are claimed.
           else if (k === 'timings' && recorded && v !== null && typeof v === 'object' && !Array.isArray(v)) {
             http.timings = { ...v, ...phases }
+          } else if (k === 'flags' && preflight && Array.isArray(v)) {
+            // Same hazard as timings: a list the app also fills must not lose the measured entry.
+            http.flags = [...new Set([...v, 'preflight'])]
           }
         }
         const note = resolveNote(req, res)
