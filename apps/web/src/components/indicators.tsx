@@ -124,6 +124,38 @@ export function ConnectionIndicator({ state }: { state: 'live' | 'paused' | 'con
   )
 }
 
+/** Where the HTTP method goes on an MCP row. `server` means we served the call,
+ *  `client` means we made it — the distinction an operator needs first, because
+ *  a failure means something different on each side. */
+export function McpRoleIndicator({ role }: { role?: string }) {
+  if (!role) return <Dash />
+  const served = role === 'server'
+  return (
+    <Box
+      component="span"
+      sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: served ? C.accent : C.info }}
+    >
+      {served ? 'TOOL' : role === 'client' ? 'CALL' : role.toUpperCase()}
+    </Box>
+  )
+}
+
+/** Where the status code goes on an MCP row. MCP has no status codes: a call
+ *  either succeeded or did not, and an absent flag is unknown rather than ok. */
+export function McpOutcomeIndicator({ ok }: { ok?: boolean }) {
+  if (ok == null) return <Dash />
+  const color = ok ? C.success : C.error
+  return (
+    <Box
+      component="span"
+      sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color, display: 'inline-flex', alignItems: 'center', gap: 0.5 }}
+    >
+      <Box component="span" sx={{ width: 5, height: 5, borderRadius: '50%', background: color }} />
+      {ok ? 'ok' : 'error'}
+    </Box>
+  )
+}
+
 function Dash() {
   return (
     <Box component="span" sx={{ color: C.muted, fontFamily: MONO, fontSize: 11 }}>

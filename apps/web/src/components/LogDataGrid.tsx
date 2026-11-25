@@ -6,7 +6,14 @@ import { useCallback, useMemo, type CSSProperties } from 'react'
 import type { LogRow } from '../lib/types'
 import { useConsole, type ColumnKey } from '../store/console'
 import { C, MONO, levelColor, statusColor } from '../lib/tokens'
-import { HttpMethodIndicator, LatencyIndicator, LevelIndicator, StatusCodeIndicator } from './indicators'
+import {
+  HttpMethodIndicator,
+  LatencyIndicator,
+  LevelIndicator,
+  McpOutcomeIndicator,
+  McpRoleIndicator,
+  StatusCodeIndicator,
+} from './indicators'
 
 function hms(ts: number): string {
   const d = new Date(ts)
@@ -98,7 +105,12 @@ export function LogDataGrid({
         headerName: 'Method',
         width: 70,
         sortable: false,
-        renderCell: (p) => <HttpMethodIndicator method={p.row.method} />,
+        renderCell: (p) =>
+          p.row.kind === 'mcp' ? (
+            <McpRoleIndicator role={p.row.mcpRole} />
+          ) : (
+            <HttpMethodIndicator method={p.row.method} />
+          ),
       },
       path: {
         field: 'path',
@@ -111,7 +123,7 @@ export function LogDataGrid({
             component="span"
             sx={{ fontFamily: MONO, fontSize: 11.5, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis' }}
           >
-            {p.row.path ?? p.row.msg}
+            {p.row.kind === 'mcp' ? p.row.tool ?? p.row.msg : p.row.path ?? p.row.msg}
           </Box>
         ),
       },
@@ -120,7 +132,8 @@ export function LogDataGrid({
         headerName: 'Status',
         width: 72,
         sortable: false,
-        renderCell: (p) => <StatusCodeIndicator status={p.row.status} />,
+        renderCell: (p) =>
+          p.row.kind === 'mcp' ? <McpOutcomeIndicator ok={p.row.ok} /> : <StatusCodeIndicator status={p.row.status} />,
       },
       duration: {
         field: 'duration',
@@ -190,6 +203,8 @@ const RAW_MUTED: CSSProperties = { color: C.muted }
 const RAW_TEXT: CSSProperties = { color: C.text }
 const RAW_TEXT2: CSSProperties = { color: C.text2 }
 const RAW_METHOD: CSSProperties = { color: C.info }
+const RAW_OK: CSSProperties = { color: C.success, fontWeight: 600 }
+const RAW_FAIL: CSSProperties = { color: C.error, fontWeight: 600 }
 
 const levelStyles = new Map<string, CSSProperties>()
 function levelStyle(level: string): CSSProperties {
@@ -246,9 +261,17 @@ export function RawLogStream({ rows }: { rows: LogRow[] }) {
           <span style={RAW_MUTED}>{hms(r.ts)}</span>{' '}
           <span style={levelStyle(r.level)}>{r.level.toUpperCase().padEnd(5)}</span>{' '}
           <span style={RAW_TEXT2}>{r.application.padEnd(12)}</span>{' '}
-          {r.method ? <span style={RAW_METHOD}>{r.method.padEnd(5)}</span> : null}
-          <span style={RAW_TEXT}>{r.path ?? r.msg}</span>{' '}
-          {r.status != null ? <span style={statusStyle(r.status)}>{r.status}</span> : null}{' '}
+          {r.kind === 'mcp' ? (
+            <span style={RAW_METHOD}>{(r.mcpRole === 'client' ? 'CALL' : 'TOOL').padEnd(5)}</span>
+          ) : r.method ? (
+            <span style={RAW_METHOD}>{r.method.padEnd(5)}</span>
+          ) : null}
+          <span style={RAW_TEXT}>{r.kind === 'mcp' ? r.tool ?? r.msg : r.path ?? r.msg}</span>{' '}
+          {r.kind === 'mcp' ? (
+            r.ok == null ? null : <span style={r.ok ? RAW_OK : RAW_FAIL}>{r.ok ? 'ok' : 'error'}</span>
+          ) : r.status != null ? (
+            <span style={statusStyle(r.status)}>{r.status}</span>
+          ) : null}{' '}
           {r.duration != null ? <span style={RAW_MUTED}>{Math.round(r.duration)}ms</span> : null}
         </div>
       ))}

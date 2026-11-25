@@ -392,7 +392,7 @@ export function Endpoints() {
   )
 }
 
-function Cell({
+export function Cell({
   children,
   right,
   color,

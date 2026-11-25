@@ -25,6 +25,7 @@ import {
   TrendingUp,
   Users,
   Workflow,
+  Wrench,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useConsole } from '../store/console'
@@ -46,6 +47,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
       { href: '/live', label: 'Live Console', icon: Terminal, ready: true },
       { href: '/explorer', label: 'Log Explorer', icon: ScrollText, ready: true },
       { href: '/endpoints', label: 'API Endpoints', icon: Route, ready: true },
+      { href: '/mcp', label: 'MCP Tools', icon: Wrench, ready: true },
       { href: '/traces', label: 'Request Traces', icon: Network },
     ],
   },
