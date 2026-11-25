@@ -104,6 +104,8 @@ export function LiveConsole() {
   const publish = useStatusFacts()
   const [rows, setRows] = useState<LogRow[]>([])
   const [selected, setSelected] = useState<LogRow | null>(null)
+  // Stable, so the memoised inspector is not re-rendered by the stream.
+  const clearSelected = useCallback(() => setSelected(null), [])
   const [state, setState] = useState<'connecting' | 'live' | 'lost'>('connecting')
   const [pendingCount, setPendingCount] = useState(0)
   const [fullscreen, setFullscreen] = useState(false)
@@ -551,7 +553,7 @@ export function LiveConsole() {
               }}
             />
             <Box sx={{ width: inspectorWidth, flex: 'none', minWidth: 0 }}>
-              <RequestInspector row={selected} onClose={() => setSelected(null)} />
+              <RequestInspector row={selected} onClose={clearSelected} />
             </Box>
           </>
         ) : null}

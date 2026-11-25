@@ -6,7 +6,7 @@ import Tabs from '@mui/material/Tabs'
 import Tooltip from '@mui/material/Tooltip'
 import IconButton from '@mui/material/IconButton'
 import dynamic from 'next/dynamic'
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { Check, Copy, X } from 'lucide-react'
 import type { LogRow } from '../lib/types'
 import { C, MONO, latencyColor, statusColor } from '../lib/tokens'
@@ -185,7 +185,18 @@ function Timing({ row }: { row: LogRow }) {
   )
 }
 
-export function RequestInspector({ row, onClose }: { row: LogRow; onClose: () => void }) {
+/* Memoised: in the live view this sits beside the stream, so without it every
+ * arriving batch of log lines re-rendered the whole inspector — tabs, headers
+ * table, waterfall and the Monaco editor — measured at 4.75ms a render and
+ * paid only once a row had been clicked. Both call sites pass a stable
+ * `onClose`; an inline arrow there would quietly undo this. */
+export const RequestInspector = memo(function RequestInspector({
+  row,
+  onClose,
+}: {
+  row: LogRow
+  onClose: () => void
+}) {
   const [tab, setTab] = useState<TabName>('Overview')
   const h = http(row)
   const req = (h.req ?? {}) as Record<string, unknown>
@@ -372,7 +383,7 @@ export function RequestInspector({ row, onClose }: { row: LogRow; onClose: () =>
       </Box>
     </Box>
   )
-}
+})
 
 function Empty({ what, hint }: { what: string; hint: string }) {
   return (

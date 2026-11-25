@@ -4,7 +4,7 @@ import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import IconButton from '@mui/material/IconButton'
 import Tooltip from '@mui/material/Tooltip'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Download, Play, TerminalSquare, Table2 } from 'lucide-react'
 import { useConsole } from '../store/console'
@@ -33,6 +33,8 @@ export function LogExplorer() {
   const [draft, setDraft] = useState(filters.query)
   const [applied, setApplied] = useState(filters.query)
   const [selected, setSelected] = useState<LogRow | null>(null)
+  // Stable, so the memoised inspector is not re-rendered by the stream.
+  const clearSelected = useCallback(() => setSelected(null), [])
   const [limit, setLimit] = useState(500)
 
   const { data, isFetching, isError, error, refetch } = useQuery<SearchResponse>({
@@ -239,7 +241,7 @@ export function LogExplorer() {
               sx={{ width: 4, cursor: 'col-resize', flex: 'none', background: C.border, '&:hover': { background: 'rgba(74,222,128,0.35)' } }}
             />
             <Box sx={{ width: inspectorWidth, flex: 'none', minWidth: 0 }}>
-              <RequestInspector row={selected} onClose={() => setSelected(null)} />
+              <RequestInspector row={selected} onClose={clearSelected} />
             </Box>
           </>
         ) : null}
