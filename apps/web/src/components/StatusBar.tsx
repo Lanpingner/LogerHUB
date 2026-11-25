@@ -73,7 +73,8 @@ export function StatusBar({ facts }: { facts: StatusFacts }) {
       </Cell>
       <Cell>Ctrl+K palette</Cell>
       <Cell>{now}</Cell>
-      <Cell>v0.1.0</Cell>
+      {/* Inlined from apps/web/package.json by next.config.mjs — never hardcode it. */}
+      <Cell title="Console version">v{process.env.NEXT_PUBLIC_APP_VERSION}</Cell>
     </Box>
   )
 }
