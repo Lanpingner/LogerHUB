@@ -24,19 +24,28 @@ test('repeated names sum into one entry', async () => {
   expect(ctx.phases().db).toBeGreaterThanOrEqual(15)
 })
 
-test('a Promise subclass whose then() throws neither reaches the caller nor loses the phase', async () => {
+test('a Promise subclass whose then() throws neither reaches the caller nor loses the elapsed time', () => {
   class Hostile<T> extends Promise<T> {
     then(): never {
       throw new Error('hostile then')
     }
   }
+  let returned: unknown
+  let completed = false
   const ctx = runWithPhases(() => {
-    let out: unknown
-    expect(() => { out = timePhase('db', () => Hostile.resolve(1)) }).not.toThrow()
-    return out
+    returned = timePhase('db', () => {
+      // Blocks synchronously: then() throws the moment fn returns, so only time spent
+      // before returning can be recovered by the fallback.
+      const until = Date.now() + 20
+      while (Date.now() < until);
+      return Hostile.resolve(1)
+    })
+    completed = true
   })
-  expect(ctx.result).toBeInstanceOf(Hostile)
-  expect(ctx.phases().db).toBeGreaterThanOrEqual(0)
+  void ctx
+  expect(completed).toBe(true)
+  expect(returned).toBeInstanceOf(Hostile)
+  expect(ctx.phases().db).toBeGreaterThanOrEqual(15)
 })
 
 test('a throwing function records its phase and rethrows', async () => {
