@@ -99,29 +99,30 @@ function renderRequest(http: Record<string, unknown>, timing?: ConsoleConfig['ti
 const colOf = (line: string, word: string) => line.indexOf(' ' + word + ' ') + 1
 
 test('the split duration renders as server+transit', () => {
-  const line = renderRequest({ duration_ms: 15.5, server_ms: 12.4, transit_ms: 3.1 })
-  expect(line).toMatch(/^\d\d:\d\d:\d\d +12ms\+3ms GET {4} \[a1b2c3d4\] \/users\/1 — 200$/)
+  const line = renderRequest({ duration_ms: 16.2, server_ms: 12.6, transit_ms: 3.6 })
+  // .6 fractions, so Math.floor would print 12ms+3ms
+  expect(line).toMatch(/^\d\d:\d\d:\d\d +13ms\+4ms GET {4} \[a1b2c3d4\] \/users\/1 — 200$/)
 })
 
 test("timing: 'total' reproduces the pinned duration column even when a split exists", () => {
-  const line = renderRequest({ duration_ms: 15.4, server_ms: 12.4, transit_ms: 3.1 }, 'total')
+  const line = renderRequest({ duration_ms: 15.6, server_ms: 12.4, transit_ms: 3.1 }, 'total')
   // Exact string, timestamp stripped: the column is 8 wide plus its separator.
-  expect(line.slice(line.indexOf(' ') + 1)).toBe('   +15ms GET     [a1b2c3d4] /users/1 — 200')
+  expect(line.slice(line.indexOf(' ') + 1)).toBe('   +16ms GET     [a1b2c3d4] /users/1 — 200')
 })
 
 test('falls back to the total when the split is absent', () => {
-  const line = renderRequest({ duration_ms: 15.4 })
-  expect(line).toMatch(/^\d\d:\d\d:\d\d +\+15ms GET/)
+  const line = renderRequest({ duration_ms: 15.6 })
+  expect(line).toMatch(/^\d\d:\d\d:\d\d +\+16ms GET/)
 })
 
 test('falls back to the total when only one half of the split is present', () => {
-  const line = renderRequest({ duration_ms: 15.4, server_ms: 12.4 })
-  expect(line).toMatch(/^\d\d:\d\d:\d\d +\+15ms GET/)
+  const line = renderRequest({ duration_ms: 15.6, server_ms: 12.4 })
+  expect(line).toMatch(/^\d\d:\d\d:\d\d +\+16ms GET/)
 })
 
 test('the duration column is a fixed width across split and fallback lines', () => {
   const splitLine = renderRequest({ duration_ms: 15.5, server_ms: 12.4, transit_ms: 3.1 })
-  const totalLine = renderRequest({ duration_ms: 15.4 })
+  const totalLine = renderRequest({ duration_ms: 15.6 })
   const longLine = renderRequest({ duration_ms: 30012, server_ms: 30000.4, transit_ms: 11.6 })
   expect(colOf(splitLine, 'GET')).toBeGreaterThan(0)
   expect(colOf(splitLine, 'GET')).toBe(colOf(totalLine, 'GET'))
@@ -139,3 +140,39 @@ test('phases never appear on the terminal line', () => {
   expect(body).not.toContain('db')
   expect(body).not.toContain('8')
 })
+
+test('an empty-string split field is not a measurement', () => {
+  const line = renderRequest({ duration_ms: 15.6, server_ms: '', transit_ms: '' })
+  expect(line).toMatch(/^\d\d:\d\d:\d\d +\+16ms GET/)
+})
+
+test.each(['split', 'total'] as const)(
+  "in-flight and finished lines put the method at the same column under timing: '%s'",
+  (timing) => {
+    const out = capture()
+    const tty = { isTTY: true, write: out.stream.write.bind(out.stream) } as unknown as NodeJS.WriteStream
+    const view = createConsoleView({ enabled: true, pending: true, stream: tty, timing }, 'svc')
+    view.pendingAdd({ id: 'deadbeef', method: 'GET', url: '/users/1', startedAt: Date.now() })
+    view.write({
+      ts: '2026-11-24T19:21:04.000Z',
+      level: 'info',
+      kind: 'request',
+      msg: 'GET /users/1',
+      meta: {
+        http: {
+          method: 'GET', path: '/users/1', request_id: 'a1b2c3d4', status: 200,
+          duration_ms: 15.6, server_ms: 12.6, transit_ms: 3.6,
+        },
+      },
+    })
+    view.close()
+    const lines = out.lines()
+    const pending = lines.find((l) => l.includes('pending...'))!
+    const finished = lines.find((l) => l.includes(' — 200'))!
+    expect(pending).toBeDefined()
+    expect(finished).toBeDefined()
+    expect(colOf(pending, 'GET')).toBe(colOf(finished, 'GET'))
+    // The pinned width itself, so both lines drifting together would still fail.
+    expect(colOf(finished, 'GET')).toBe(8 + 1 + (timing === 'split' ? 13 : 8) + 1)
+  },
+)

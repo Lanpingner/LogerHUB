@@ -146,6 +146,9 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
   const showPending = Boolean(cfg.pending) && isTty
   const file = cfg.file
   const splitTiming = cfg.timing !== 'total'
+  // Shared by finished and in-flight lines so their method columns align. 13 holds
+  // `30000ms+999ms`; 'total' keeps the original 8 because that layout is pinned.
+  const durWidth = splitTiming ? 13 : 8
 
   const tagLetters = cfg.authTagLetters?.length ? cfg.authTagLetters : DEFAULT_TAG_LETTERS
   const tagAlways = cfg.authTagAlways ?? DEFAULT_TAG_ALWAYS
@@ -162,7 +165,7 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
 
   function pendingLine(r: PendingRequest): string {
     const elapsed = Date.now() - r.startedAt
-    const dur = ('+' + elapsed + 'ms').padStart(8)
+    const dur = ('+' + elapsed + 'ms').padStart(durWidth)
     return (
       PENDING_COLOR +
       hhmmss(r.startedAt) + ' ' + dur + ' ' + r.method.padEnd(7) +
@@ -242,16 +245,15 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     const extra = typeof http.note === 'string' && http.note !== '' ? ' (' + http.note + ')' : ''
     const server = Number(http.server_ms)
     const transit = Number(http.transit_ms)
+    // typeof as well as isFinite: Number('') is 0, which would pass as a measurement.
     const split =
-      splitTiming && http.server_ms != null && http.transit_ms != null &&
+      splitTiming &&
+      typeof http.server_ms === 'number' && typeof http.transit_ms === 'number' &&
       Number.isFinite(server) && Number.isFinite(transit)
     const total = Number.isFinite(duration) ? '+' + Math.round(duration) + 'ms' : ''
-    // One width for both forms, or the method column would jump between lines and a
-    // scan down the log would stop lining up. 13 holds `30000ms+999ms`; 'total' keeps
-    // the original 8 because that layout is pinned.
-    const dur = (split ? Math.round(server) + 'ms+' + Math.round(transit) + 'ms' : total).padStart(
-      splitTiming ? 13 : 8,
-    )
+    // One width for every form, or the method column would jump between lines and a
+    // scan down the log would stop lining up.
+    const dur = (split ? Math.round(server) + 'ms+' + Math.round(transit) + 'ms' : total).padStart(durWidth)
     const tone = color ? statusColor(Number.isFinite(status) ? status : 200) : ''
     // The tag is built per line because its letters are painted relative to this
     // line's own colour.
