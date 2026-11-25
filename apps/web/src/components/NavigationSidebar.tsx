@@ -2,6 +2,7 @@
 
 import Box from '@mui/material/Box'
 import Tooltip from '@mui/material/Tooltip'
+import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   Activity,
@@ -124,7 +125,7 @@ export function NavigationSidebar() {
               const Icon = item.icon
               const row = (
                 <Box
-                  component="a"
+                  component={Link}
                   href={item.href}
                   key={item.href}
                   aria-current={active ? 'page' : undefined}

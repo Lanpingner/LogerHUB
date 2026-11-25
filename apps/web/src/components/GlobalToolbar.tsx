@@ -5,6 +5,7 @@ import MenuItem from '@mui/material/MenuItem'
 import Select from '@mui/material/Select'
 import Tooltip from '@mui/material/Tooltip'
 import IconButton from '@mui/material/IconButton'
+import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Bell, PanelLeft, Search, Settings, SquareTerminal } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
@@ -162,7 +163,7 @@ export function GlobalToolbar({ email, onOpenPalette }: { email: string; onOpenP
         </IconButton>
       </Tooltip>
       <Tooltip title="Settings">
-        <IconButton component="a" href="/settings" aria-label="Settings">
+        <IconButton component={Link} href="/settings" aria-label="Settings">
           <Settings size={15} />
         </IconButton>
       </Tooltip>

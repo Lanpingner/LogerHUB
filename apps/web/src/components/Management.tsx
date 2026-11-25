@@ -6,6 +6,7 @@ import MenuItem from '@mui/material/MenuItem'
 import Select from '@mui/material/Select'
 import TextField from '@mui/material/TextField'
 import { useState, useTransition } from 'react'
+import Link from 'next/link'
 import { KeyRound, Trash2 } from 'lucide-react'
 import { C, MONO } from '../lib/tokens'
 import { Panel } from './Panel'
@@ -289,7 +290,7 @@ export function SavedQueries() {
                 >
                   <Box sx={{ fontSize: 12, color: C.text, minWidth: 110 }}>{q.name}</Box>
                   <Box
-                    component="a"
+                    component={Link}
                     href="/explorer"
                     onClick={() => patchFilters({ query: q.query })}
                     sx={{ fontFamily: MONO, fontSize: 11, color: C.accent, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -310,7 +311,7 @@ export function SavedQueries() {
               queryHistory.map((q, i) => (
                 <Box
                   key={q + i}
-                  component="a"
+                  component={Link}
                   href="/explorer"
                   onClick={() => patchFilters({ query: q })}
                   sx={{
