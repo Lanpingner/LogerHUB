@@ -6,6 +6,9 @@ export interface LogRow {
   application: string
   service: string
   env: string
+  /** Which structured kind this entry declared, when it declared one: `request`
+   *  or `mcp`. The inspector reads it to decide what it is looking at. */
+  kind?: string
   method?: string
   path?: string
   route?: string
@@ -20,6 +23,13 @@ export interface LogRow {
   /** The address the gateway saw the batch arrive from. Observed server-side,
    *  never sent by the client, so it is the one field a sender cannot shape. */
   sourceIp?: string
+  /** MCP tool call fields. Present only on a `kind: 'mcp'` row; `duration`
+   *  above is shared with HTTP, which is why `duration:` spans both. */
+  tool?: string
+  mcpRole?: string
+  mcpServer?: string
+  callId?: string
+  ok?: boolean
   msg: string
   payload: Record<string, unknown> | null
 }

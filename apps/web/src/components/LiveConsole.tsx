@@ -56,6 +56,7 @@ interface LiveEntry {
 
 function toRow(e: LiveEntry, seq: number): LogRow {
   const http = (e.meta?.http ?? {}) as Record<string, unknown>
+  const mcp = (e.meta?.mcp ?? {}) as Record<string, unknown>
   const num = (v: unknown) => {
     const n = Number(v)
     return Number.isFinite(n) ? n : undefined
@@ -64,6 +65,7 @@ function toRow(e: LiveEntry, seq: number): LogRow {
     id: 'live-' + seq,
     ts: Date.parse(e.ts) || Date.now(),
     level: e.level,
+    kind: e.kind,
     application: e.service,
     service: e.service,
     env: e.env,
@@ -71,7 +73,12 @@ function toRow(e: LiveEntry, seq: number): LogRow {
     path: (http.path ?? http.route) as string | undefined,
     route: http.route as string | undefined,
     status: num(http.status),
-    duration: num(http.duration_ms),
+    duration: num(http.duration_ms ?? mcp.duration_ms),
+    tool: mcp.tool as string | undefined,
+    mcpRole: mcp.role as string | undefined,
+    mcpServer: mcp.server as string | undefined,
+    callId: mcp.call_id as string | undefined,
+    ok: typeof mcp.ok === 'boolean' ? mcp.ok : undefined,
     company: e.dims?.company_id,
     user: e.dims?.user_id,
     apiKey: e.dims?.api_key_id,
@@ -80,9 +87,15 @@ function toRow(e: LiveEntry, seq: number): LogRow {
     instance: e.dims?.instance,
     sourceIp: e.source_ip,
     msg: e.msg,
-    // `_source_ip` matches what the stored line carries, so the Raw JSON tab
-    // reads the same for a live row and the same row fetched back from Loki.
-    payload: { msg: e.msg, ...(e.meta ?? {}), ...(e.source_ip ? { _source_ip: e.source_ip } : {}) },
+    // `kind` and `_source_ip` match what the stored line carries, so the Raw JSON
+    // tab reads the same for a live row and the same row fetched back from Loki —
+    // and a `kind:mcp` term, which reads the payload, filters the live view too.
+    payload: {
+      msg: e.msg,
+      ...(e.meta ?? {}),
+      ...(e.kind ? { kind: e.kind } : {}),
+      ...(e.source_ip ? { _source_ip: e.source_ip } : {}),
+    },
   }
 }
 

@@ -10,6 +10,9 @@ export interface LogRow {
   application: string
   service: string
   env: string
+  /** Which structured kind this entry declared, when it declared one: `request`
+   *  or `mcp`. The inspector reads it to decide what it is looking at. */
+  kind?: string
   method?: string
   path?: string
   route?: string
@@ -24,6 +27,13 @@ export interface LogRow {
   /** The address the gateway saw the batch arrive from. Observed server-side,
    *  never sent by the client, so it is the one field a sender cannot shape. */
   sourceIp?: string
+  /** MCP tool call fields. Present only on a `kind: 'mcp'` row; `duration`
+   *  above is shared with HTTP, which is why `duration:` spans both. */
+  tool?: string
+  mcpRole?: string
+  mcpServer?: string
+  callId?: string
+  ok?: boolean
   msg: string
   payload: Record<string, unknown> | null
 }
@@ -52,12 +62,16 @@ function toRow(stream: Record<string, string>, ns: string, line: string, meta: R
     // A non-JSON line is shown raw.
   }
   const http = (payload?.http ?? {}) as Record<string, unknown>
+  const mcp = (payload?.mcp ?? {}) as Record<string, unknown>
   const dims = (payload?.dims ?? {}) as Record<string, string>
   const pick = (key: string) => meta[key] ?? dims[key]
   return {
     id: ns + ':' + (meta.request_id ?? Math.random().toString(36).slice(2, 8)),
     ts: Number(ns) / 1e6,
     level: stream.level ?? 'info',
+    // Structured metadata first, the line copy as the fallback: Loki does not
+    // return metadata from every query path.
+    kind: meta.kind ?? (payload?.kind as string | undefined),
     application: stream.service ?? 'unknown',
     service: meta.service ?? stream.service ?? 'unknown',
     env: stream.env ?? '',
@@ -65,7 +79,14 @@ function toRow(stream: Record<string, string>, ns: string, line: string, meta: R
     path: (http.path as string | undefined) ?? meta.path,
     route: meta.route ?? (http.route as string | undefined),
     status: num(meta.status ?? http.status),
-    duration: num(meta.duration_ms ?? http.duration_ms),
+    duration: num(meta.duration_ms ?? http.duration_ms ?? mcp.duration_ms),
+    tool: meta.tool ?? (mcp.tool as string | undefined),
+    mcpRole: meta.role ?? (mcp.role as string | undefined),
+    mcpServer: mcp.server as string | undefined,
+    callId: meta.call_id ?? (mcp.call_id as string | undefined),
+    // `ok` is a string in metadata and a boolean in the line; neither may be
+    // read as "succeeded" when it is simply absent.
+    ok: meta.ok !== undefined ? meta.ok === 'true' : typeof mcp.ok === 'boolean' ? mcp.ok : undefined,
     company: pick('company_id'),
     user: pick('user_id'),
     apiKey: pick('api_key_id'),

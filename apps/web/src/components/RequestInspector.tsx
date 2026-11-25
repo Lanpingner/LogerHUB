@@ -17,12 +17,46 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), {
   loading: () => <Box sx={{ p: 2, fontSize: 11, color: C.muted }}>Loading editor…</Box>,
 })
 
-const TABS = ['Overview', 'Request', 'Response', 'Headers', 'Timing', 'Trace', 'Exception', 'Raw JSON'] as const
-type TabName = (typeof TABS)[number]
+/** Tabs per entry kind. An MCP call has no headers and no response body, and a
+ *  pane that is permanently empty is worse than no pane: it reads as missing
+ *  data rather than as a question that does not apply. */
+const HTTP_TABS = ['Overview', 'Request', 'Response', 'Headers', 'Timing', 'Trace', 'Exception', 'Raw JSON'] as const
+const MCP_TABS = ['Overview', 'Arguments', 'Result', 'Timing', 'Error', 'Raw JSON'] as const
+type TabName = (typeof HTTP_TABS)[number] | (typeof MCP_TABS)[number]
 
-function http(row: LogRow): Record<string, unknown> {
-  const h = row.payload?.http
+function section(row: LogRow, name: 'http' | 'mcp'): Record<string, unknown> {
+  const h = row.payload?.[name]
   return h && typeof h === 'object' ? (h as Record<string, unknown>) : {}
+}
+
+const http = (row: LogRow): Record<string, unknown> => section(row, 'http')
+const mcp = (row: LogRow): Record<string, unknown> => section(row, 'mcp')
+
+const isMcp = (row: LogRow): boolean => row.kind === 'mcp'
+
+/** `TOOL` for a call this service served, `CALL` for one it made. The same two
+ *  words the client prints in its own terminal. */
+function McpRoleIndicator({ role }: { role?: string }) {
+  const text = role === 'client' ? 'CALL' : 'TOOL'
+  return (
+    <Box component="span" sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: C.purple }}>
+      {text}
+    </Box>
+  )
+}
+
+function OutcomeIndicator({ ok }: { ok?: boolean }) {
+  if (ok == null) return null
+  const color = ok ? C.success : C.error
+  return (
+    <Box
+      component="span"
+      sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color, display: 'inline-flex', alignItems: 'center', gap: 0.5 }}
+    >
+      <Box component="span" sx={{ width: 5, height: 5, borderRadius: '50%', background: color }} />
+      {ok ? 'ok' : 'error'}
+    </Box>
+  )
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
@@ -89,7 +123,9 @@ function Field({ label, children, mono = true }: { label: string; children: Reac
 /** Only timings that were actually collected are shown — an empty waterfall is
  *  better than invented segments. */
 function Timing({ row }: { row: LogRow }) {
-  const h = http(row)
+  // Phases are reported the same way for both kinds — logger.time() — so this
+  // renderer is shared; only where the map lives differs.
+  const h = isMcp(row) ? mcp(row) : http(row)
   const timings = (h.timings ?? h.timing) as Record<string, number> | undefined
   const total = row.duration ?? 0
   // Scalars, deliberately not merged into `timings`: that map is drawn as one flat
@@ -116,7 +152,8 @@ function Timing({ row }: { row: LogRow }) {
         <Field label="Total">{row.duration != null ? <LatencyIndicator ms={row.duration} /> : null}</Field>
         {split}
         <Box sx={{ mt: 2, fontSize: 11.5, color: C.muted, lineHeight: 1.7 }}>
-          No phase breakdown was reported for this request. Wrap the work you want to see, for example{' '}
+          No phase breakdown was reported for this {isMcp(row) ? 'call' : 'request'}. Wrap the work you want to
+          see, for example{' '}
           <Box component="code" sx={{ fontFamily: MONO, color: C.text2 }}>
             {"logger.time('db', fn)"}
           </Box>
@@ -199,11 +236,19 @@ export const RequestInspector = memo(function RequestInspector({
 }) {
   const [tab, setTab] = useState<TabName>('Overview')
   const h = http(row)
+  const m = mcp(row)
+  const tool = isMcp(row)
+  const TABS: readonly TabName[] = tool ? MCP_TABS : HTTP_TABS
+  // Clicking a second row can change the kind under a selected tab, and the tab
+  // that was open may not exist in the new set.
+  const active: TabName = TABS.includes(tab) ? tab : 'Overview'
   const req = (h.req ?? {}) as Record<string, unknown>
   const res = (h.res ?? {}) as Record<string, unknown>
   const err = (row.payload?.err ?? row.payload?.error ?? row.payload?.exception) as
     | Record<string, unknown>
     | undefined
+  // A failed tool call's error is recorded by the client as name and message.
+  const mcpErr = (m.error ?? undefined) as Record<string, unknown> | undefined
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.panel, minWidth: 0 }}>
@@ -218,7 +263,7 @@ export const RequestInspector = memo(function RequestInspector({
           borderBottom: '1px solid ' + C.border,
         }}
       >
-        <HttpMethodIndicator method={row.method} />
+        {tool ? <McpRoleIndicator role={row.mcpRole} /> : <HttpMethodIndicator method={row.method} />}
         <Box
           sx={{
             fontFamily: MONO,
@@ -229,11 +274,11 @@ export const RequestInspector = memo(function RequestInspector({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={row.path ?? row.msg}
+          title={(tool ? row.tool : row.path) ?? row.msg}
         >
-          {row.path ?? row.msg}
+          {(tool ? row.tool : row.path) ?? row.msg}
         </Box>
-        <StatusCodeIndicator status={row.status} />
+        {tool ? <OutcomeIndicator ok={row.ok} /> : <StatusCodeIndicator status={row.status} />}
         <CopyButton text={JSON.stringify(row.payload ?? { msg: row.msg }, null, 2)} label="Copy payload" />
         <Tooltip title="Close · Esc">
           <IconButton onClick={onClose} aria-label="Close inspector">
@@ -243,7 +288,7 @@ export const RequestInspector = memo(function RequestInspector({
       </Box>
 
       <Tabs
-        value={tab}
+        value={active}
         onChange={(_e, v) => setTab(v as TabName)}
         variant="scrollable"
         scrollButtons={false}
@@ -255,7 +300,7 @@ export const RequestInspector = memo(function RequestInspector({
       </Tabs>
 
       <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-        {tab === 'Overview' ? (
+        {active === 'Overview' ? (
           <Box sx={{ p: 3 }}>
             <Field label="Time">{new Date(row.ts).toISOString().replace('T', ' ').replace('Z', '')}</Field>
             <Field label="Level">
@@ -272,9 +317,22 @@ export const RequestInspector = memo(function RequestInspector({
             <Field label="Instance">{row.instance}</Field>
             <Field label="Source IP">{row.sourceIp}</Field>
             <Box sx={{ height: 1, background: C.border, my: 1.5 }} />
-            <Field label="Method">{row.method}</Field>
-            <Field label="Route">{row.route}</Field>
-            <Field label="Status">{row.status}</Field>
+            {tool ? (
+              <>
+                <Field label="Tool">{row.tool}</Field>
+                <Field label="Role">{row.mcpRole === 'client' ? 'client — a tool this service used' : 'server — a call this service served'}</Field>
+                <Field label="MCP server">{row.mcpServer}</Field>
+                <Field label="Outcome">
+                  <OutcomeIndicator ok={row.ok} />
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field label="Method">{row.method}</Field>
+                <Field label="Route">{row.route}</Field>
+                <Field label="Status">{row.status}</Field>
+              </>
+            )}
             <Field label="Duration">
               {row.duration != null ? (
                 <Box component="span" sx={{ color: latencyColor(row.duration) }}>
@@ -286,12 +344,12 @@ export const RequestInspector = memo(function RequestInspector({
             <Field label="Company">{row.company}</Field>
             <Field label="User">{row.user}</Field>
             <Field label="API key">{row.apiKey}</Field>
-            <Field label="Request id">{row.requestId}</Field>
+            {tool ? <Field label="Call id">{row.callId}</Field> : <Field label="Request id">{row.requestId}</Field>}
             <Field label="Trace id">{row.traceId}</Field>
           </Box>
         ) : null}
 
-        {tab === 'Request' ? (
+        {active === 'Request' ? (
           Object.keys(req).length ? (
             <Json value={req} />
           ) : (
@@ -299,7 +357,7 @@ export const RequestInspector = memo(function RequestInspector({
           )
         ) : null}
 
-        {tab === 'Response' ? (
+        {active === 'Response' ? (
           Object.keys(res).length ? (
             <Json value={res} />
           ) : (
@@ -307,7 +365,7 @@ export const RequestInspector = memo(function RequestInspector({
           )
         ) : null}
 
-        {tab === 'Headers' ? (
+        {active === 'Headers' ? (
           req.headers && typeof req.headers === 'object' && Object.keys(req.headers).length ? (
             <Box sx={{ p: 3 }}>
               {Object.entries(req.headers as Record<string, unknown>).map(([k, v]) => (
@@ -325,9 +383,9 @@ export const RequestInspector = memo(function RequestInspector({
           )
         ) : null}
 
-        {tab === 'Timing' ? <Timing row={row} /> : null}
+        {active === 'Timing' ? <Timing row={row} /> : null}
 
-        {tab === 'Trace' ? (
+        {active === 'Trace' ? (
           row.traceId ? (
             <Box sx={{ p: 3 }}>
               <Field label="Trace id">{row.traceId}</Field>
@@ -344,7 +402,7 @@ export const RequestInspector = memo(function RequestInspector({
           )
         ) : null}
 
-        {tab === 'Exception' ? (
+        {active === 'Exception' ? (
           err ? (
             <Box sx={{ p: 3 }}>
               <Field label="Type">
@@ -380,16 +438,67 @@ export const RequestInspector = memo(function RequestInspector({
           )
         ) : null}
 
-        {tab === 'Raw JSON' ? <Json value={row.payload ?? { msg: row.msg }} /> : null}
+        {active === 'Arguments' ? (
+          m.args !== undefined ? (
+            <Json value={m.args} />
+          ) : (
+            <Empty
+              what="arguments"
+              subject="call"
+              hint="Arguments are captured by default; `capture: 'never'` or 'on-error' in the SDK options turns them off for a successful call."
+            />
+          )
+        ) : null}
+
+        {active === 'Result' ? (
+          m.result !== undefined ? (
+            <Json value={m.result} />
+          ) : (
+            <Empty
+              what="result"
+              subject="call"
+              hint="A call that threw has no result — see the Error tab. Otherwise capture was off for this call."
+            />
+          )
+        ) : null}
+
+        {active === 'Error' ? (
+          mcpErr ? (
+            <Box sx={{ p: 3 }}>
+              <Field label="Type">
+                <Box component="span" sx={{ color: C.error }}>
+                  {String(mcpErr.name ?? 'Error')}
+                </Box>
+              </Field>
+              <Field label="Message" mono={false}>
+                {String(mcpErr.message ?? '')}
+              </Field>
+              <Box sx={{ mt: 2, fontSize: 11, color: C.muted, lineHeight: 1.7, maxWidth: 420 }}>
+                A tool error is recorded as its name and message; the stack stays inside the service that threw
+                it. A call that failed without throwing — a result carrying `isError` — shows under Result.
+              </Box>
+            </Box>
+          ) : (
+            <Empty
+              what="error"
+              subject="call"
+              hint={row.ok === false
+                ? 'This call failed without throwing: the tool returned a result flagged isError, which is under Result.'
+                : 'This call succeeded.'}
+            />
+          )
+        ) : null}
+
+        {active === 'Raw JSON' ? <Json value={row.payload ?? { msg: row.msg }} /> : null}
       </Box>
     </Box>
   )
 })
 
-function Empty({ what, hint }: { what: string; hint: string }) {
+function Empty({ what, hint, subject = 'request' }: { what: string; hint: string; subject?: string }) {
   return (
     <Box sx={{ p: 3 }}>
-      <Box sx={{ fontSize: 12, color: C.text2 }}>No {what} was recorded for this request.</Box>
+      <Box sx={{ fontSize: 12, color: C.text2 }}>No {what} was recorded for this {subject}.</Box>
       <Box sx={{ mt: 1, fontSize: 11, color: C.muted, lineHeight: 1.7, maxWidth: 420 }}>{hint}</Box>
     </Box>
   )
