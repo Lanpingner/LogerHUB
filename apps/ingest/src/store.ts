@@ -8,6 +8,7 @@ export interface UsageRow {
   lines: number
   bytes: number
   requests: number
+  mcp_calls: number
   errors: number
 }
 
@@ -59,6 +60,8 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
   lines INTEGER NOT NULL DEFAULT 0,
   bytes INTEGER NOT NULL DEFAULT 0,
   requests INTEGER NOT NULL DEFAULT 0,
+  -- MCP tool calls, counted apart from the requests column: see rollup.ts.
+  mcp_calls INTEGER NOT NULL DEFAULT 0,
   errors INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (hour, depth, dims)
 );
@@ -145,6 +148,32 @@ export function openStore(file: string) {
   db.exec('PRAGMA foreign_keys = ON')
   db.exec(SCHEMA)
 
+  /**
+   * Adds a column to a table that predates it. `CREATE TABLE IF NOT EXISTS`
+   * does nothing to an existing table, so every column added after the first
+   * release needs this. Idempotent by construction — it reads the table's
+   * columns first — so it is safe on every start, and `ADD COLUMN` with a
+   * `NOT NULL DEFAULT` rewrites no rows: existing history keeps every counter
+   * it had and reads the default for the new one, which is the truth.
+   */
+  const addColumn = (table: string, column: string, definition: string): void => {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+      if (cols.length === 0 || cols.some((c) => c.name === column)) return
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    } catch {
+      // A table we cannot inspect is one we should not alter.
+    }
+  }
+
+  // Usage gained a counter for MCP tool calls. In place: this table is the
+  // operator's only record of what has been sent, and rebuilding it would
+  // throw away every hour of history.
+  addColumn('usage_rollup', 'mcp_calls', 'INTEGER NOT NULL DEFAULT 0')
+  // Operators gained `must_change_password`. Also in place: it is the only
+  // record of who can log in.
+  addColumn('operators', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0')
+
   // The dedupe ledger gained `completed_at` and a per-key primary key. It holds
   // at most 24 hours of ids and nothing reads it for history, so rebuilding is
   // safe and simpler than an in-place migration.
@@ -156,17 +185,6 @@ export function openStore(file: string) {
     }
   } catch {
     // A store we cannot inspect is one we should not silently rewrite.
-  }
-
-  // Operators gained `must_change_password`. Added in place, because unlike the
-  // dedupe ledger this table is the only record of who can log in.
-  try {
-    const cols = db.prepare('PRAGMA table_info(operators)').all() as { name: string }[]
-    if (cols.length && !cols.some((c) => c.name === 'must_change_password')) {
-      db.exec('ALTER TABLE operators ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
-    }
-  } catch {
-    // An operator table we cannot inspect is one we should not alter.
   }
 
   const st = {
@@ -186,12 +204,13 @@ export function openStore(file: string) {
       'DELETE FROM ingest_errors WHERE id NOT IN (SELECT id FROM ingest_errors ORDER BY at DESC LIMIT ?)',
     ),
     rollup: db.prepare(`
-      INSERT INTO usage_rollup (hour, depth, dims, lines, bytes, requests, errors)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO usage_rollup (hour, depth, dims, lines, bytes, requests, mcp_calls, errors)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(hour, depth, dims) DO UPDATE SET
         lines = lines + excluded.lines,
         bytes = bytes + excluded.bytes,
         requests = requests + excluded.requests,
+        mcp_calls = mcp_calls + excluded.mcp_calls,
         errors = errors + excluded.errors`),
     logError: db.prepare('INSERT INTO ingest_errors (at, key_id, reason, detail) VALUES (?, ?, ?, ?)'),
     countRollup: db.prepare('SELECT COUNT(*) AS n FROM usage_rollup WHERE hour = ? AND depth = ?'),
@@ -208,7 +227,7 @@ export function openStore(file: string) {
     recentErrors: db.prepare('SELECT * FROM ingest_errors ORDER BY at DESC LIMIT 100'),
     operatorByEmail: db.prepare('SELECT * FROM operators WHERE email = ?'),
     usageAtDepth: db.prepare(
-      'SELECT hour, dims, lines, bytes, requests, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour',
+      'SELECT hour, dims, lines, bytes, requests, mcp_calls, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour',
     ),
     insertOperator: db.prepare(
       'INSERT INTO operators (id, email, password_hash, created_at, must_change_password) VALUES (?, ?, ?, ?, ?)',
@@ -292,7 +311,7 @@ export function openStore(file: string) {
     releaseBatch(batchId: string, keyId: string): void {
       try { st.releaseBatch.run(keyId, batchId) } catch {}
     },
-    rollup(rows: { hour: number; depth: number; dims: string; lines: number; bytes: number; requests: number; errors: number }[]) {
+    rollup(rows: { hour: number; depth: number; dims: string; lines: number; bytes: number; requests: number; mcp_calls: number; errors: number }[]) {
       const tx = db.prepare('BEGIN IMMEDIATE')
       tx.run()
       try {
@@ -318,7 +337,7 @@ export function openStore(file: string) {
           } else if (!st.hasRollup.get(r.hour, r.depth, r.dims)) {
             counts.set(bucket, n + 1)
           }
-          st.rollup.run(r.hour, r.depth, dims, r.lines, r.bytes, r.requests, r.errors)
+          st.rollup.run(r.hour, r.depth, dims, r.lines, r.bytes, r.requests, r.mcp_calls, r.errors)
         }
         db.prepare('COMMIT').run()
         if (folded > 0) rolledUpOverflow = folded
@@ -372,6 +391,7 @@ export function openStore(file: string) {
         lines: number
         bytes: number
         requests: number
+        mcp_calls: number
         errors: number
       }[]
       const out: UsageRow[] = []
@@ -392,7 +412,10 @@ export function openStore(file: string) {
           }
           if (!ok) continue
         }
-        out.push({ hour: r.hour, dims, lines: r.lines, bytes: r.bytes, requests: r.requests, errors: r.errors })
+        out.push({
+          hour: r.hour, dims, lines: r.lines, bytes: r.bytes,
+          requests: r.requests, mcp_calls: r.mcp_calls, errors: r.errors,
+        })
       }
       return out
     },

@@ -11,7 +11,15 @@ export interface LokiPushOptions {
   sourceIp?: string
 }
 
-const METADATA_FROM_META = ['method', 'route', 'status', 'duration_ms', 'request_id'] as const
+/** Per entry kind, the `meta.<kind>` fields promoted into Loki's structured
+ *  metadata. Promotion is what makes a field server-side filterable, so this
+ *  table is the other half of `FIELDS` in the query language: `tool:` works
+ *  because `tool` is here. `duration_ms` is deliberately the same name under
+ *  both kinds — that is what lets `duration:>500` span them. */
+const METADATA_FROM_META = {
+  http: ['method', 'route', 'status', 'duration_ms', 'request_id'],
+  mcp: ['tool', 'role', 'call_id', 'duration_ms', 'ok'],
+} as const
 
 function structuredMetadata(e: LogEntry, extra: string[], sourceIp?: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -24,10 +32,11 @@ function structuredMetadata(e: LogEntry, extra: string[], sourceIp?: string): Re
     if (typeof v === 'string' && v) out[k] = v
   }
   if (e.kind) out.kind = e.kind
-  const http = (e.meta as { http?: Record<string, unknown> } | undefined)?.http
-  if (http && typeof http === 'object') {
-    for (const k of METADATA_FROM_META) {
-      const v = (http as Record<string, unknown>)[k]
+  for (const [section, keys] of Object.entries(METADATA_FROM_META)) {
+    const from = (e.meta as Record<string, unknown> | undefined)?.[section]
+    if (from === null || typeof from !== 'object') continue
+    for (const k of keys) {
+      const v = (from as Record<string, unknown>)[k]
       if (v != null && typeof v !== 'object') out[k] = String(v)
     }
   }

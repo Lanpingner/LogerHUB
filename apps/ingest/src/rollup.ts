@@ -8,6 +8,10 @@ export interface RollupRow {
   lines: number
   bytes: number
   requests: number
+  /** MCP tool calls. Counted apart from `requests` on purpose: an operator
+   *  reading "requests" means HTTP, and folding tool calls in would silently
+   *  change what every existing chart and bill is counting. */
+  mcp_calls: number
   errors: number
 }
 
@@ -26,6 +30,7 @@ export function rollupRows(
     const hour = Math.floor((Date.parse(e.ts) || Date.now()) / 1000 / HOUR) * HOUR
     const bytes = Buffer.byteLength(e.msg) + (e.meta ? Buffer.byteLength(JSON.stringify(e.meta)) : 0)
     const isRequest = e.kind === 'request' ? 1 : 0
+    const isMcp = e.kind === 'mcp' ? 1 : 0
     const isError = e.level === 'error' || e.level === 'fatal' ? 1 : 0
     const source: Record<string, string> = { ...(e.dims ?? {}), service }
 
@@ -35,12 +40,13 @@ export function rollupRows(
       const key = `${hour}\u0000${depth}\u0000${dims}`
       let row = acc.get(key)
       if (!row) {
-        row = { hour, depth, dims, lines: 0, bytes: 0, requests: 0, errors: 0 }
+        row = { hour, depth, dims, lines: 0, bytes: 0, requests: 0, mcp_calls: 0, errors: 0 }
         acc.set(key, row)
       }
       row.lines += 1
       row.bytes += bytes
       row.requests += isRequest
+      row.mcp_calls += isMcp
       row.errors += isError
     }
   }
