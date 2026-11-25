@@ -1,3 +1,5 @@
+import { KINDS } from './protocol.ts'
+
 /** LogerHub query language.
  *
  *  `app:atlas status:>=500 duration:>1000 NOT path:/health`
@@ -65,6 +67,9 @@ export const FIELDS = {
   request: { kind: 'meta', label: 'request_id', numeric: false, help: 'Request id' },
   trace: { kind: 'meta', label: 'trace_id', numeric: false, help: 'Trace id' },
   instance: { kind: 'meta', label: 'instance', numeric: false, help: 'Server instance' },
+
+  kind: { kind: 'meta', label: 'kind', numeric: false, help: 'request or mcp' },
+  tool: { kind: 'meta', label: 'tool', numeric: false, help: 'MCP tool name' },
 } as const
 
 export type FieldName = keyof typeof FIELDS
@@ -282,9 +287,21 @@ function fieldValue(c: Candidate, field: FieldName): string | undefined {
     if (spec.label === 'env') return c.env
     if (spec.label === 'level') return c.level
   }
-  const http = (c.meta as { http?: Record<string, unknown> }).http
-  const fromHttp = http && typeof http === 'object' ? (http as Record<string, unknown>)[spec.label] : undefined
-  const v = c.dims[spec.label] ?? fromHttp
+  // `kind` lives on the entry itself rather than under a per-kind namespace. The
+  // line body carries it (see the gateway's `line()`), so it is read from the top
+  // of `meta` — the one field that is not inside `http` or `mcp`.
+  if (spec.label === 'kind') {
+    const k = (c.meta as { kind?: unknown }).kind
+    return typeof k === 'string' ? k : undefined
+  }
+  const section = (name: 'http' | 'mcp'): Record<string, unknown> | undefined => {
+    const v = (c.meta as Record<string, unknown>)[name]
+    return v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : undefined
+  }
+  // An entry has one or the other, never both, so the order between them is
+  // arbitrary; dims still win, as they always did.
+  const fromMeta = section('http')?.[spec.label] ?? section('mcp')?.[spec.label]
+  const v = c.dims[spec.label] ?? fromMeta
   return v == null ? undefined : String(v)
 }
 
@@ -386,7 +403,9 @@ export function suggest(input: string, caret: number, known: { services: string[
   if (!(field in FIELDS)) return []
 
   const values: string[] =
-    field === 'level'
+    field === 'kind'
+      ? [...KINDS]
+      : field === 'level'
       ? ['debug', 'info', 'warn', 'error', 'fatal']
       : field === 'method'
         ? ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']

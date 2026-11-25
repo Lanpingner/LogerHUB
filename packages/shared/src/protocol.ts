@@ -2,6 +2,13 @@ export const LEVELS = ['debug', 'info', 'warn', 'error', 'fatal'] as const
 
 export type Level = (typeof LEVELS)[number]
 
+/** The structured entry kinds. A closed set: the client's union, the gateway's
+ *  validation and the console's renderers are all derived from it, so none of
+ *  them can drift from the others. Anything else an entry claims is dropped. */
+export const KINDS = ['request', 'mcp'] as const
+
+export type Kind = (typeof KINDS)[number]
+
 export const HELLO_DEFAULTS = {
   maxEntriesPerBatch: 500,
   maxBatchBytes: 1048576,
@@ -17,7 +24,7 @@ export const LOKI_LIMITS = {
 export interface LogEntry {
   ts: string
   level: Level
-  kind?: 'request'
+  kind?: Kind
   msg: string
   dims?: Record<string, string>
   meta?: Record<string, unknown>
