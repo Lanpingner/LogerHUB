@@ -92,18 +92,35 @@ function Timing({ row }: { row: LogRow }) {
   const h = http(row)
   const timings = (h.timings ?? h.timing) as Record<string, number> | undefined
   const total = row.duration ?? 0
+  // Scalars, deliberately not merged into `timings`: that map is drawn as one flat
+  // waterfall normalised by its sum, and phases like db run inside server time, so
+  // mixing them would double-count. Absent on entries logged before the split existed.
+  const split = (
+    <>
+      {typeof h.server_ms === 'number' ? (
+        <Field label="Server">
+          <LatencyIndicator ms={h.server_ms} />
+        </Field>
+      ) : null}
+      {typeof h.transit_ms === 'number' ? (
+        <Field label="Transit">
+          <LatencyIndicator ms={h.transit_ms} />
+        </Field>
+      ) : null}
+    </>
+  )
 
   if (!timings || typeof timings !== 'object' || !Object.keys(timings).length) {
     return (
       <Box sx={{ p: 3 }}>
         <Field label="Total">{row.duration != null ? <LatencyIndicator ms={row.duration} /> : null}</Field>
+        {split}
         <Box sx={{ mt: 2, fontSize: 11.5, color: C.muted, lineHeight: 1.7 }}>
-          No phase breakdown was sent with this request. The SDK records total duration by default; to see
-          authentication, database and external-call phases here, report them as{' '}
+          No phase breakdown was reported for this request. Wrap the work you want to see, for example{' '}
           <Box component="code" sx={{ fontFamily: MONO, color: C.text2 }}>
-            meta.http.timings
+            {"logger.time('db', fn)"}
           </Box>
-          .
+          , and it appears here as a phase.
         </Box>
       </Box>
     )
@@ -117,6 +134,7 @@ function Timing({ row }: { row: LogRow }) {
   return (
     <Box sx={{ p: 3 }}>
       <Field label="Total">{row.duration != null ? <LatencyIndicator ms={row.duration} /> : null}</Field>
+      {split}
       <Box sx={{ mt: 2, display: 'grid', gap: 1 }}>
         {entries.map(([name, value], i) => {
           const width = (value / sum) * 100
