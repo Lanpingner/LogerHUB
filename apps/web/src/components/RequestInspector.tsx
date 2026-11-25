@@ -129,6 +129,21 @@ function Timing({ row }: { row: LogRow }) {
   const entries = Object.entries(timings).filter(([, v]) => typeof v === 'number' && v >= 0)
   const sum = entries.reduce((a, [, v]) => a + v, 0) || 1
   let offset = 0
+  // Phases run inside server time, so that is what they are measured against; transit
+  // is response delivery and can never be attributed to a phase. Entries without the
+  // split fall back to total.
+  const ref = typeof h.server_ms === 'number' ? h.server_ms : total
+  const basis = typeof h.server_ms === 'number' ? 'server time' : 'total'
+  let note: string | null = null
+  if (ref && sum - ref > ref * 0.05) {
+    // Concurrent phases each report their full duration, so overlap is expected, not an error.
+    note = `Phases sum to ${Math.round(sum)}ms, more than the ${Math.round(ref)}ms of ${basis}. Phases that run concurrently each report their full duration, so they can overlap.`
+  } else if (ref && ref - sum > ref * 0.05) {
+    note =
+      basis === 'server time'
+        ? `Phases cover ${Math.round(sum)}ms of ${Math.round(ref)}ms server time; the remaining ${Math.round(ref - sum)}ms is server time that no phase accounts for.`
+        : `Phases sum to ${Math.round(sum)}ms against a total of ${Math.round(ref)}ms; the difference is time not attributed to any phase.`
+  }
   const palette = [C.info, C.accent, C.purple, C.warning, '#60A5FA', C.error]
 
   return (
@@ -163,11 +178,8 @@ function Timing({ row }: { row: LogRow }) {
           )
         })}
       </Box>
-      {total && Math.abs(sum - total) > total * 0.05 ? (
-        <Box sx={{ mt: 2, fontSize: 11, color: C.muted }}>
-          Phases sum to {Math.round(sum)}ms against a total of {Math.round(total)}ms; the difference is time not
-          attributed to any phase.
-        </Box>
+      {note ? (
+        <Box sx={{ mt: 2, fontSize: 11, color: C.muted }}>{note}</Box>
       ) : null}
     </Box>
   )
