@@ -5,7 +5,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 test('records an async phase under its name', async () => {
   const ctx = runWithPhases(() => timePhase('db', () => sleep(20)))
   await ctx.result
-  expect(ctx.phases().db).toBeGreaterThanOrEqual(15)
+  expect(ctx.phases().db).toBeGreaterThanOrEqual(18)
 })
 
 test('a sync function is returned directly, not wrapped in a promise', () => {
@@ -22,6 +22,21 @@ test('repeated names sum into one entry', async () => {
   await ctx.result
   expect(Object.keys(ctx.phases())).toEqual(['db'])
   expect(ctx.phases().db).toBeGreaterThanOrEqual(15)
+})
+
+test('a Promise subclass whose then() throws neither reaches the caller nor loses the phase', async () => {
+  class Hostile<T> extends Promise<T> {
+    then(): never {
+      throw new Error('hostile then')
+    }
+  }
+  const ctx = runWithPhases(() => {
+    let out: unknown
+    expect(() => { out = timePhase('db', () => Hostile.resolve(1)) }).not.toThrow()
+    return out
+  })
+  expect(ctx.result).toBeInstanceOf(Hostile)
+  expect(ctx.phases().db).toBeGreaterThanOrEqual(0)
 })
 
 test('a throwing function records its phase and rethrows', async () => {

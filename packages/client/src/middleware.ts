@@ -2,7 +2,7 @@ import type { ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { redactBody, redactHeaders, truncateJson } from './redact'
 import { ulid } from './ulid'
-import { runWithPhases } from './phases'
+import { runWithPhases, RESERVED_PHASE_NAMES } from './phases'
 import type { ConsoleView } from './console'
 import type { ExpressMiddleware, Logger, MiddlewareOptions, RequestLike } from './types'
 
@@ -126,8 +126,10 @@ export function createExpressMiddleware(
     const startedAt = Date.now()
     const sampled = mode === 'sample' && Math.random() < rate
     // Independent of body capture: `bodies: 'never'` must not cost the timing split.
-    const firstByte = markFirstByte(res)
+    // Installed after captureResponse so its wrapper is outermost: capture's byte-copy work then
+    // runs after the timestamp instead of inflating server_ms.
     const body = mode === 'never' ? undefined : captureResponse(res, mode, sampled, maxBytes)
+    const firstByte = markFirstByte(res)
     let emitted = false
 
     // The id is settled on entry, not on finish: the in-flight line must carry the
@@ -208,12 +210,18 @@ export function createExpressMiddleware(
         // Application facts last, but they cannot overwrite the measured ones: a
         // resolveMeta that returns `status` must not be able to rewrite the status
         // the usage counts are derived from.
+        // server/transit are scalars on http; inside the timings map they would be charted as one
+        // more flat segment and distort every other share of the bar.
+        const withoutReserved = (m: object): Record<string, unknown> =>
+          Object.fromEntries(Object.entries(m).filter(([n]) => !RESERVED_PHASE_NAMES.includes(n)))
         for (const [k, v] of Object.entries(resolveExtra(req, res))) {
-          if (!Object.hasOwn(http, k)) http[k] = v
+          if (!Object.hasOwn(http, k)) {
+            http[k] = k === 'timings' && v !== null && typeof v === 'object' && !Array.isArray(v) ? withoutReserved(v) : v
+          }
           // The guard above is right for scalars but would silently drop one of two maps: keep
           // both, recorded phases winning because they are measured and the app's are claimed.
           else if (k === 'timings' && recorded && v !== null && typeof v === 'object' && !Array.isArray(v)) {
-            http.timings = { ...v, ...phases }
+            http.timings = { ...withoutReserved(v), ...phases }
           } else if (k === 'flags' && preflight && Array.isArray(v)) {
             // Same hazard as timings: a list the app also fills must not lose the measured entry.
             http.flags = [...new Set([...v, 'preflight'])]

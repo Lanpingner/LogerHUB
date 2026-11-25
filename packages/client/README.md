@@ -126,7 +126,7 @@ app.use(log.expressMiddleware({
 }))
 ```
 
-`resolveMeta` cannot overwrite the measured fields (`status`, `duration_ms`, `method`, `route`, `request_id`): usage counts are derived from those. The tag letters are configurable with `authTagLetters` and `authTagAlways` on the `console` options.
+`resolveMeta` cannot overwrite the measured fields (`status`, `duration_ms`, `server_ms`, `transit_ms`, `method`, `route`, `request_id`): usage counts are derived from those. The tag letters are configurable with `authTagLetters` and `authTagAlways` on the `console` options.
 
 `captureIp` is off by default, because an IP is personal data. With it on, `trustProxyHops` says how many of your own proxies to trust; the chain is read from the right, since a client can append to `x-forwarded-for`.
 
@@ -158,7 +158,7 @@ try { renderPage() } finally { done() }
 - Phases are self-reported totals, not a partition of server time. Concurrent phases can sum to more than the wall-clock, and time you did not wrap simply is not listed.
 - `timings` never contains `server` or `transit`; those stay separate fields so the waterfall adds up.
 
-If `compression` is mounted after the logger middleware, which is the usual order, its response wrapper is the outermost one, so the first-byte mark lands when compression flushes rather than at your application's first write. Gzip time therefore counts inside `server_ms`. That is intended, since compressing is server-side CPU work, but it explains why `server_ms` can exceed the sum of your phases.
+The first-byte mark lands at your application's first write even behind `compression`, because compression flushes headers (through `writeHead`) before it compresses anything. Gzip time therefore mostly lands in `transit_ms`, not `server_ms`.
 
 ## WebSocket traffic
 

@@ -312,7 +312,7 @@ test('a request through the error handler still has a split', async () => {
   expect(http.transit_ms).toBeGreaterThanOrEqual(0)
 })
 
-test('a double end() does not move the mark or go negative', async () => {
+test('a double end() yields non-negative server and transit', async () => {
   const { app, entries } = await appWith({})
   await request(app).get('/double-end').expect(200)
   const http = (await entries())[0].meta.http
@@ -341,6 +341,14 @@ test('an explicit writeHead with no body still marks the first byte', async () =
   await request(app).get('/head-only').expect(204)
   const http = (await entries())[0].meta.http
   expect(http.server_ms).toBeGreaterThanOrEqual(0)
+})
+
+test('writeHead alone marks the first byte, ahead of a gap before end()', async () => {
+  const { app, entries } = await appWith({})
+  await request(app).get('/head-gap').expect(204)
+  const http = (await entries())[0].meta.http
+  expect(http.server_ms).toBeLessThan(15)
+  expect(http.transit_ms).toBeGreaterThanOrEqual(20)
 })
 
 test('an app cannot overwrite the measurement via resolveMeta', async () => {
@@ -636,36 +644,51 @@ test('resolveMeta timings and recorded phases both survive, recorded winning a c
   expect(t.auth).toBe(7)
 })
 
+test('reserved names are dropped from resolveMeta timings on both merge paths', async () => {
+  const { app, entries, log } = await appWith({
+    resolveMeta: () => ({ timings: { server: 50, transit: 9, db: 40 } }),
+  })
+  app.get('/both-reserved', async (_req, res) => {
+    await log.time('cache', () => sleep(5))
+    res.json({ ok: true })
+  })
+  await request(app).get('/users/1').expect(200) // no recorded phases: the hasOwn path
+  await request(app).get('/both-reserved').expect(200) // recorded phases: the explicit merge
+  const [plain, merged] = await entries()
+  expect(plain.meta.http.timings).toEqual({ db: 40 })
+  expect(Object.keys(merged.meta.http.timings).sort()).toEqual(['cache', 'db'])
+})
+
 test('resolveMeta timings pass through untouched when no phase was recorded', async () => {
   const { app, entries } = await appWith({ resolveMeta: () => ({ timings: { auth: 7 } }) })
   await request(app).get('/users/1').expect(200)
   expect((await entries())[0].meta.http.timings).toEqual({ auth: 7 })
 })
 
-const preflightOf = (e: any): string[] => e.meta.http.flags ?? []
+const flagsOf = (e: any): string[] => e.meta.http.flags ?? []
 
 test('a CORS preflight is flagged', async () => {
   const { app, entries } = await appWith({})
   await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
-  expect(preflightOf((await entries())[0])).toEqual(['preflight'])
+  expect(flagsOf((await entries())[0])).toEqual(['preflight'])
 })
 
 test('a plain OPTIONS is not flagged', async () => {
   const { app, entries } = await appWith({})
   await request(app).options('/users/1')
-  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+  expect(flagsOf((await entries())[0])).not.toContain('preflight')
 })
 
 test('OPTIONS with an Origin but no Access-Control-Request-Method is not flagged', async () => {
   const { app, entries } = await appWith({})
   await request(app).options('/users/1').set('Origin', 'https://example.com')
-  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+  expect(flagsOf((await entries())[0])).not.toContain('preflight')
 })
 
 test('OPTIONS with Access-Control-Request-Method but no Origin is not flagged', async () => {
   const { app, entries } = await appWith({})
   await request(app).options('/users/1').set('Access-Control-Request-Method', 'GET')
-  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+  expect(flagsOf((await entries())[0])).not.toContain('preflight')
 })
 
 test('a GET carrying both CORS headers is not flagged', async () => {
@@ -675,25 +698,25 @@ test('a GET carrying both CORS headers is not flagged', async () => {
     .set('Origin', 'https://example.com')
     .set('Access-Control-Request-Method', 'GET')
     .expect(200)
-  expect(preflightOf((await entries())[0])).not.toContain('preflight')
+  expect(flagsOf((await entries())[0])).not.toContain('preflight')
 })
 
 test("an app's own flags survive alongside the preflight flag", async () => {
   const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['ip-exc'] }) })
   await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
-  expect(preflightOf((await entries())[0])).toEqual(['ip-exc', 'preflight'])
+  expect(flagsOf((await entries())[0])).toEqual(['ip-exc', 'preflight'])
 })
 
 test('a preflight flag the app also supplies is not duplicated', async () => {
   const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['preflight'] }) })
   await request(app).options('/users/1').set('Origin', 'https://example.com').set('Access-Control-Request-Method', 'GET')
-  expect(preflightOf((await entries())[0])).toEqual(['preflight'])
+  expect(flagsOf((await entries())[0])).toEqual(['preflight'])
 })
 
 test("an app's flags pass through untouched when the request is not a preflight", async () => {
   const { app, entries } = await appWith({ resolveMeta: () => ({ flags: ['ip-exc'] }) })
   await request(app).options('/users/1')
-  expect(preflightOf((await entries())[0])).toEqual(['ip-exc'])
+  expect(flagsOf((await entries())[0])).toEqual(['ip-exc'])
 })
 
 test('preflights still count as requests', async () => {

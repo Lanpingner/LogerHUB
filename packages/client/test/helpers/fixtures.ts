@@ -93,6 +93,13 @@ export async function appWith(
     res.writeHead(204)
     res.end()
   })
+  app.get('/head-gap', (_req, res) => {
+    res.writeHead(204)
+    // Blocks the loop so end() cannot be what marks the first byte before the gap is measured.
+    const until = Date.now() + 25
+    while (Date.now() < until);
+    res.end()
+  })
   app.get('/gap', (_req, res) => {
     res.write('a')
     setTimeout(() => res.end('b'), 25)

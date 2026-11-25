@@ -53,7 +53,13 @@ export function timePhase<T>(name: string, fn: () => T): T {
   }
   if (result instanceof Promise) {
     // Both arms record and swallow, so the branch itself can never become an unhandled rejection.
-    result.then(() => record(map, name, startedAt), () => record(map, name, startedAt))
+    try {
+      result.then(() => record(map, name, startedAt), () => record(map, name, startedAt))
+    } catch {
+      // A subclass whose then() throws must not reach the app, which got a perfectly good result;
+      // recording here keeps the elapsed time we would otherwise lose.
+      record(map, name, startedAt)
+    }
     return result
   }
   if (isThenable(result)) {
