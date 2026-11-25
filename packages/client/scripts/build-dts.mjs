@@ -9,12 +9,19 @@ const tmp = 'dist/.dts'
 fs.rmSync(tmp, { recursive: true, force: true })
 execFileSync('tsc', ['-p', 'tsconfig.build.json', '--outDir', tmp], { stdio: 'inherit' })
 
-const types = fs.readFileSync(`${tmp}/types.d.ts`, 'utf8').replace(/^import type \{ LogEntry \} from '@logguber\/shared';\n/m, '')
+// Whatever types.ts imports from shared is assembled below instead, so the import goes.
+const types = fs.readFileSync(`${tmp}/types.d.ts`, 'utf8').replace(/^import type \{[^}]*\} from '@logguber\/shared';\n/m, '')
 const wire = fs.readFileSync(`${tmp}/../../../shared/src/protocol.ts`, 'utf8')
-const levels = wire.match(/^export const LEVELS = \[(.*?)\] as const$/m)?.[1]
-const level = levels && `export type Level = ${levels.split(',').map((l) => l.trim()).filter((l) => l !== '').join(' | ')}`
+/** `export const X = ['a', 'b'] as const` -> `export type Y = 'a' | 'b'`. */
+const union = (constName, typeName) => {
+  const raw = wire.match(new RegExp(`^export const ${constName} = \\[(.*?)\\] as const$`, 'm'))?.[1]
+  if (!raw) return undefined
+  return `export type ${typeName} = ${raw.split(',').map((l) => l.trim()).filter((l) => l !== '').join(' | ')}`
+}
+const level = union('LEVELS', 'Level')
+const kind = union('KINDS', 'Kind')
 const entry = wire.match(/^export interface LogEntry \{[\s\S]*?^\}$/m)?.[0]
-if (!level || !entry) throw new Error('could not find LEVELS/LogEntry in shared/src/protocol.ts')
+if (!level || !kind || !entry) throw new Error('could not find LEVELS/KINDS/LogEntry in shared/src/protocol.ts')
 const fn = (name) => {
   const file = `${tmp}/${name}.d.ts`
   const fnName = name === 'logger' ? 'createLogger' : 'createSink'
@@ -28,6 +35,7 @@ const out = [
   '',
   '// Wire types, copied from @logguber/shared (which is bundled into the JavaScript).',
   level,
+  kind,
   entry,
   '',
   fn('logger'),

@@ -432,3 +432,78 @@ test('a socket error is logged without breaking the socket', async () => {
   expect(e.level).toBe('error')
   expect(e.meta.error).toContain('socket broke')
 })
+
+/* ---------- MCP tool calls ---------- */
+
+test('an mcp entry gets its own line: tool, server and outcome', async () => {
+  const out = fakeStream(false)
+  const log = await logger({ enabled: true, stream: out.stream })
+  log.mcpCall({ tool: 'search_issues', server: 'atlas-tools', durationMs: 412, callId: 'a1b2c3d4' })
+  await log.flush()
+  expect(lines(out.text())[0]).toMatch(/^\d{2}:\d{2}:\d{2} +\+412ms TOOL +\[a1b2c3d4\] search_issues @atlas-tools — ok$/)
+})
+
+test('a client-role call reads as CALL rather than TOOL', async () => {
+  const out = fakeStream(false)
+  const log = await logger({ enabled: true, stream: out.stream })
+  log.mcpCall({ tool: 'get_cash', role: 'client', durationMs: 18, callId: 'deadbeef' })
+  await log.flush()
+  expect(lines(out.text())[0]).toContain('CALL    [deadbeef] get_cash — ok')
+})
+
+test('a failed call shows the error message on the line', async () => {
+  const out = fakeStream(false)
+  const log = await logger({ enabled: true, stream: out.stream })
+  log.mcpCall({ tool: 'get_cash', durationMs: 5, callId: 'c0ffee00', error: new Error('upstream 503') })
+  await log.flush()
+  expect(lines(out.text())[0]).toContain('[c0ffee00] get_cash — error: upstream 503')
+})
+
+test('tags, flags, dimensions and a note are appended as they are on a request line', async () => {
+  const out = fakeStream(false)
+  const log = await logger({ enabled: true, stream: out.stream })
+  log.mcpCall({
+    tool: 't',
+    durationMs: 1,
+    callId: 'aaaaaaaa',
+    tags: { agent: 'claude' },
+    flags: ['retry'],
+    note: 'cache warm',
+    dims: { company_id: 'acme' },
+  })
+  await log.flush()
+  expect(lines(out.text())[0]).toContain('[aaaaaaaa] t agent:claude retry company:acme — ok (cache warm)')
+})
+
+test('an mcp entry whose meta was lost still prints as a plain line', async () => {
+  const out = fakeStream(false)
+  const log = await logger({ enabled: true, label: 'app.js', stream: out.stream })
+  log.log('info', 'mcp t ok', { kind: 'mcp' })
+  await log.flush()
+  expect(lines(out.text())[0]).toContain('[app.js]: mcp t ok')
+})
+
+test('output stderr keeps every line off stdout, which an mcp server needs', async () => {
+  const stdout: string[] = []
+  const stderr: string[] = []
+  const realOut = process.stdout.write.bind(process.stdout)
+  const realErr = process.stderr.write.bind(process.stderr)
+  process.stdout.write = ((s: string) => {
+    stdout.push(String(s))
+    return true
+  }) as typeof process.stdout.write
+  process.stderr.write = ((s: string) => {
+    stderr.push(String(s))
+    return true
+  }) as typeof process.stderr.write
+  try {
+    const log = await logger({ enabled: true, output: 'stderr', label: 'srv' })
+    log.mcpCall({ tool: 'search_issues', durationMs: 3, callId: 'bbbbbbbb' })
+    await log.flush()
+  } finally {
+    process.stdout.write = realOut
+    process.stderr.write = realErr
+  }
+  expect(stderr.join('')).toContain('search_issues')
+  expect(stdout.join('')).toBe('')
+})

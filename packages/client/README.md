@@ -70,6 +70,7 @@ const log = createLogger({
   console: {
     enabled: true,
     level: 'debug',     // local floor; the gateway still receives everything
+    output: 'stdout',   // 'stderr' for any process whose stdout is a protocol stream
     pending: true,      // redraw in-flight requests at the bottom of the terminal (TTY only)
     file: './log/logfile.log',   // also append the uncoloured line
   },
@@ -159,6 +160,69 @@ try { renderPage() } finally { done() }
 - `timings` never contains `server` or `transit`; those stay separate fields so the waterfall adds up.
 
 The first-byte mark lands at your application's first write even behind `compression`, because compression flushes headers (through `writeHead`) before it compresses anything. Gzip time therefore mostly lands in `transit_ms`, not `server_ms`.
+
+## MCP tool calls
+
+An MCP tool call is a request/response exchange with a name, arguments, a result and a failure
+mode, so it is recorded as its own structured kind — `kind: 'mcp'` — and the console gives it the
+same treatment HTTP requests get. No MCP SDK is involved: these wrap your own function, so a
+hand-rolled server works exactly like one built on `@modelcontextprotocol/sdk`.
+
+**The server side** — the calls this process serves:
+
+```js
+server.setRequestHandler(CallToolRequestSchema, log.wrapMcpTool(
+  'search_issues',
+  async (req) => doSearch(req.params.arguments),
+  {
+    server: 'atlas-tools',
+    resolveDims: (req) => ({ user_id: req.params._meta?.user }),
+    capture: 'always',        // 'never' | 'on-error' | 'always' (default)
+  },
+))
+```
+
+**The agent side** — the tools this process uses:
+
+```js
+const callTool = log.wrapMcpClient(client.callTool.bind(client), { server: 'atlas-tools' })
+await callTool({ name: 'search_issues', arguments: { query: 'disk full' } })
+```
+
+Both record one entry per completed call: `role` (`server` or `client`), `tool`, `server`,
+`call_id`, `duration_ms`, `ok`, and the arguments and result. A result carrying `isError: true` —
+the MCP convention for an in-band tool error — counts as a failure, as does a thrown error, which
+is recorded as its name and message. Phases reported with `log.time('db', fn)` anywhere beneath
+the handler land in `meta.mcp.timings` and are drawn as a waterfall in the console.
+
+The wrapper keeps your function's own signature: a synchronous handler stays synchronous, a
+promise stays the same promise, and the result or error always reaches the caller untouched. A
+failure inside logging can cost the entry; it can never cost the call.
+
+When your server dispatches tools through its own router, or you already have the timing, report
+the call directly:
+
+```js
+log.mcpCall({ tool: 'search_issues', durationMs: 412, args, result })
+```
+
+Arguments and results go through the same redaction as HTTP bodies and are capped by
+`maxBodyBytes` (default 8192). Capture defaults to `always` here, unlike HTTP bodies: call volume
+is far lower and the arguments are most of the record.
+
+Search them with `kind:mcp`, `tool:search_issues`, and `duration:>500` — the duration field is
+shared with HTTP on purpose.
+
+### On a stdio MCP server, log to stderr
+
+```js
+const log = createLogger({ /* ... */, console: { enabled: true, output: 'stderr' } })
+```
+
+A stdio MCP server's **stdout is the protocol stream**. One log line written there and every
+JSON-RPC frame after it is malformed. `output: 'stderr'` is the only safe setting for that
+process, and it is not detected automatically: a process cannot tell a pipe from a terminal, and
+guessing wrong either way is worse than saying which you have. Over HTTP or SSE, stdout is fine.
 
 ## WebSocket traffic
 

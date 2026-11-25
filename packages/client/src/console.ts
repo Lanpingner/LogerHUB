@@ -132,7 +132,9 @@ const NOOP: ConsoleView = {
 export function createConsoleView(cfg: ConsoleConfig | undefined, service: string): ConsoleView {
   if (!cfg?.enabled) return NOOP
 
-  const out = cfg.stream ?? process.stdout
+  // stdout is not always a terminal: on a stdio MCP server it is the protocol
+  // stream, and one line written there corrupts every frame after it.
+  const out = cfg.stream ?? (cfg.output === 'stderr' ? process.stderr : process.stdout)
   const isTty = Boolean((out as NodeJS.WriteStream).isTTY)
   // NO_COLOR is a convention worth honouring: a pipeline that strips colour
   // should not have to filter escape codes out of its logs.
@@ -211,6 +213,29 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     redraw()
   }
 
+  /**
+   * The application's own short labels, then the entry's dimensions. A tag of
+   * the same name as a dimension wins: the application named it deliberately.
+   * `true` renders as a bare word rather than `key:value`, so a single ordered
+   * record can reproduce any interleaving of labels and flags on the line.
+   * Shared by request and mcp lines, which carry the same three sources.
+   */
+  function shortLabels(tags: unknown, flags: unknown, dims: Record<string, string> | undefined): string {
+    const shown = new Map<string, string | true>()
+    for (const [k, v] of Object.entries(asRecord(tags))) {
+      if (v === true) shown.set(k, true)
+      else if (v != null && v !== '' && typeof v !== 'object') shown.set(k, String(v))
+    }
+    if (Array.isArray(flags)) {
+      for (const f of flags) if (typeof f === 'string' && f !== '') shown.set(f, true)
+    }
+    for (const [k, v] of Object.entries(dims ?? {})) {
+      const short = k.replace(/_id$/, '')
+      if (v && !shown.has(short)) shown.set(short, v)
+    }
+    return [...shown].map(([k, v]) => (v === true ? ' ' + k : ' ' + k + ':' + v)).join('')
+  }
+
   function requestLine(entry: LogEntry): { plain: string; painted: string } | null {
     const http = entry.meta?.http as Record<string, unknown> | undefined
     if (!http || typeof http !== 'object') return null
@@ -223,24 +248,7 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     const id = http.request_id ? String(http.request_id) : ''
     const ip = http.ip ? String(http.ip) : ''
 
-    // `tags` and `flags` are the application's own short labels. Dimensions are
-    // appended too, so a company or user id shows without a format option per field,
-    // but a tag of the same name wins: the application named it deliberately.
-    // `true` renders as a bare word rather than `key:value`, so a single ordered
-    // record can reproduce any interleaving of labels and flags on the line.
-    const shown = new Map<string, string | true>()
-    for (const [k, v] of Object.entries(asRecord(http.tags))) {
-      if (v === true) shown.set(k, true)
-      else if (v != null && v !== '' && typeof v !== 'object') shown.set(k, String(v))
-    }
-    if (Array.isArray(http.flags)) {
-      for (const f of http.flags) if (typeof f === 'string' && f !== '') shown.set(f, true)
-    }
-    for (const [k, v] of Object.entries(entry.dims ?? {})) {
-      const short = k.replace(/_id$/, '')
-      if (v && !shown.has(short)) shown.set(short, v)
-    }
-    const tags = [...shown].map(([k, v]) => (v === true ? ' ' + k : ' ' + k + ':' + v)).join('')
+    const tags = shortLabels(http.tags, http.flags, entry.dims)
 
     const extra = typeof http.note === 'string' && http.note !== '' ? ' (' + http.note + ')' : ''
     const server = Number(http.server_ms)
@@ -276,6 +284,38 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
     }
   }
 
+  /**
+   * One mcp line. Same column grid as a request line — time, duration, a word
+   * where the method goes, the id, the name — so a log carrying both still
+   * scans vertically. `TOOL` is a call this process served, `CALL` one it made.
+   */
+  function mcpLine(entry: LogEntry): { plain: string; painted: string } | null {
+    const mcp = entry.meta?.mcp as Record<string, unknown> | undefined
+    if (!mcp || typeof mcp !== 'object') return null
+
+    const started = Date.parse(entry.ts)
+    const duration = Number(mcp.duration_ms)
+    const tool = String(mcp.tool ?? '')
+    const id = mcp.call_id ? String(mcp.call_id) : ''
+    const ok = mcp.ok !== false
+    const server = typeof mcp.server === 'string' && mcp.server !== '' ? ' @' + mcp.server : ''
+    const tags = shortLabels(mcp.tags, mcp.flags, entry.dims)
+    const note = typeof mcp.note === 'string' && mcp.note !== '' ? ' (' + mcp.note + ')' : ''
+    const message = (mcp.error as { message?: unknown } | undefined)?.message
+    const outcome = ok ? 'ok' : 'error' + (typeof message === 'string' && message !== '' ? ': ' + message : '')
+
+    const dur = (Number.isFinite(duration) ? '+' + Math.round(duration) + 'ms' : '').padStart(durWidth)
+    const body =
+      hhmmss(Number.isFinite(started) ? started : Date.now()) + ' ' + dur + ' ' +
+      (mcp.role === 'client' ? 'CALL' : 'TOOL').padEnd(7) +
+      (id ? ' [' + id + ']' : '') + ' ' + tool + server + tags +
+      ' — ' + outcome + note
+    // Green or red by outcome, reusing the status colours: 200 and 500 are what
+    // "it worked" and "it did not" already look like in this log.
+    const tone = color ? statusColor(ok ? 200 : 500) : ''
+    return { plain: body, painted: tone ? tone + body + RESET : body }
+  }
+
   function plainLine(entry: LogEntry): { plain: string; painted: string } {
     const rest = entry.meta ? safeStringify(entry.meta) : ''
     const body = entry.msg + (rest && rest !== '{}' ? ' ' + rest : '')
@@ -288,7 +328,9 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
   return {
     write(entry) {
       if (LEVELS.indexOf(entry.level) < minimum) return
-      const formatted = entry.kind === 'request' ? requestLine(entry) ?? plainLine(entry) : plainLine(entry)
+      const formatted =
+        (entry.kind === 'request' ? requestLine(entry) : entry.kind === 'mcp' ? mcpLine(entry) : null) ??
+        plainLine(entry)
       print(formatted.painted)
       toFile(formatted.plain)
     },

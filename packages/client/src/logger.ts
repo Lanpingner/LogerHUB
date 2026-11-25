@@ -1,8 +1,10 @@
 import {
   HELLO_DEFAULTS,
+  KINDS,
   LEVELS,
   type BatchFrame,
   type HelloFrame,
+  type Kind,
   type Level,
   type LogEntry,
   type NackFrame,
@@ -16,6 +18,7 @@ import { createExpressMiddleware } from './middleware'
 import { createConsoleView, formatArg, type ConsoleView } from './console'
 import { createWsInstrumentation } from './ws'
 import { startPhase, timePhase } from './phases'
+import { recordMcpCall, wrapMcpClient, wrapMcpTool } from './mcp'
 import type { Logger, LoggerOptions, LogOptions, WebSocketServerLike, WsOptions } from './types'
 
 const DEFAULT_MAX_ENTRIES = 100
@@ -499,7 +502,7 @@ export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
       level: isLevel(raw.level) ? raw.level : 'info',
       msg: typeof raw.msg === 'string' ? raw.msg : String(raw.msg ?? ''),
     }
-    if (raw.kind === 'request') entry.kind = 'request'
+    if (typeof raw.kind === 'string' && (KINDS as readonly string[]).includes(raw.kind)) entry.kind = raw.kind as Kind
     const merged = mergeDims([baseDims, dims, raw.dims], (e) => report('dims', e))
     if (Object.keys(merged).length > 0) entry.dims = merged
     if (raw.meta !== undefined) {
@@ -597,6 +600,9 @@ function wrap(
     fatal: plain('fatal'),
     child: (o) => wrap(core, core.mergeChildDims(dims, o?.dims), false, headerAllowlist),
     expressMiddleware: (o) => createExpressMiddleware(self, { ...o, headerAllowlist }, core.console),
+    mcpCall: (c) => recordMcpCall(self, c),
+    wrapMcpTool: (tool, handler, o) => wrapMcpTool(self, tool, handler, o),
+    wrapMcpClient: (call, o) => wrapMcpClient(self, call, o),
     instrumentWs: (server, o) => createWsInstrumentation(self, server, o, core.console),
     time: timePhase,
     phase: startPhase,

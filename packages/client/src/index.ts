@@ -10,6 +10,11 @@ export type {
   LoggerOptions,
   LogMethod,
   LogOptions,
+  McpCall,
+  McpCapture,
+  McpCaptureOptions,
+  McpClientOptions,
+  McpToolOptions,
   MiddlewareOptions,
   RedactOptions,
   RequestLike,
@@ -19,4 +24,4 @@ export type {
   WebSocketServerLike,
   WsOptions,
 } from './types'
-export type { Level, LogEntry } from '@logguber/shared'
+export type { Kind, Level, LogEntry } from '@logguber/shared'
