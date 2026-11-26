@@ -351,6 +351,22 @@ app.use(log.expressMiddleware({
 process.on('SIGTERM', () => log.close())
 ```
 
+Every entry carries an `instance` dimension, so the console can answer which
+host or container a line came from and which replica has gone quiet. It defaults
+to the machine's hostname — inside a container, its id. Name it yourself, or
+turn it off:
+
+```js
+createLogger({ ...opts, instance: process.env.POD_NAME })  // name it
+createLogger({ ...opts, instance: false })                 // send nothing
+```
+
+A hostname can identify a machine, and on a single-host deployment it tells you
+nothing you did not already know, which is the case for `false`. It is sent but
+deliberately not printed on the local terminal lines: that output is already
+coming from one instance, so stamping its name on every line is noise — and it
+would put the machine's name into any pasted log or screenshot.
+
 ### In your MCP server
 
 ```js

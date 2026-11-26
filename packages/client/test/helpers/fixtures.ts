@@ -36,6 +36,11 @@ export const base = {
   service: 'public-api',
   env: 'test',
   onError: () => {},
+  // Off here so a test asserting a dims object gets back what it put in. The
+  // default — the machine's hostname — would otherwise appear in every one of
+  // them, and the assertion would depend on the name of the machine running the
+  // suite. The default itself is pinned in instance.test.ts.
+  instance: false as const,
 }
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))

@@ -220,6 +220,13 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
    * record can reproduce any interleaving of labels and flags on the line.
    * Shared by request and mcp lines, which carry the same three sources.
    */
+  /** Dimensions worth shipping but not worth printing here. This output is
+   *  produced BY one instance, on that instance's own terminal, so stamping its
+   *  hostname on every line says nothing — and it puts the machine's name into
+   *  any pasted log or screenshot. The console in the browser, which sees lines
+   *  from every instance at once, is where it earns its place. */
+  const LOCAL_NOISE = new Set(['instance'])
+
   function shortLabels(tags: unknown, flags: unknown, dims: Record<string, string> | undefined): string {
     const shown = new Map<string, string | true>()
     for (const [k, v] of Object.entries(asRecord(tags))) {
@@ -230,6 +237,7 @@ export function createConsoleView(cfg: ConsoleConfig | undefined, service: strin
       for (const f of flags) if (typeof f === 'string' && f !== '') shown.set(f, true)
     }
     for (const [k, v] of Object.entries(dims ?? {})) {
+      if (LOCAL_NOISE.has(k)) continue
       const short = k.replace(/_id$/, '')
       if (v && !shown.has(short)) shown.set(short, v)
     }

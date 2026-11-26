@@ -9,6 +9,7 @@ import {
   type LogEntry,
   type NackFrame,
 } from '@logguber/shared'
+import { hostname } from 'node:os'
 import { createBatcher } from './batcher'
 import { redactBody, truncateJson } from './redact'
 import { createSpool, type Spool } from './spool'
@@ -239,9 +240,38 @@ export function createCore(opts: LoggerOptions): LoggerCore {
   return buildCore(opts, {})
 }
 
+/** Dimension values are capped by the gateway at 256 bytes; a hostname far
+ *  shorter than that is already unreasonable, and a long one is a sign of a
+ *  mistake rather than a name. */
+const MAX_INSTANCE_LENGTH = 64
+
+/** The `instance` dimension, or undefined when the caller opted out.
+ *
+ *  Reading the hostname is a syscall that can fail in a sandbox, and no entry
+ *  should be lost because a machine would not say its own name. */
+export function resolveInstance(opt: string | false | undefined): string | undefined {
+  if (opt === false) return undefined
+  if (typeof opt === 'string') {
+    const trimmed = opt.trim()
+    return trimmed === '' ? undefined : trimmed.slice(0, MAX_INSTANCE_LENGTH)
+  }
+  try {
+    const host = hostname()
+    return typeof host === 'string' && host !== '' ? host.slice(0, MAX_INSTANCE_LENGTH) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function buildCore(opts: LoggerOptions, hooks: CoreHooks): LoggerCore {
   const report = createReporter(opts.onError)
-  const baseDims = mergeDims([opts.dims], (e) => report('dims', e))
+  // First, so an explicit `dims.instance` overrides the resolved one: the
+  // caller naming its own instance is more informative than a hostname.
+  const instance = resolveInstance(opts.instance)
+  const baseDims = mergeDims(
+    [instance === undefined ? undefined : { instance }, opts.dims],
+    (e) => report('dims', e),
+  )
   // Built first: a failure here must not be reported through a console that does
   // not exist yet, and `enqueue` depends on it.
   let view: ConsoleView

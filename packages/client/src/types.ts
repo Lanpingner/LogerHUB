@@ -77,6 +77,17 @@ export interface LoggerOptions {
   backoff?: { baseMs: number; maxMs: number }
   /** Dimensions stamped on every entry. */
   dims?: Record<string, string>
+  /**
+   * Identifies the host or container this process runs on, stamped on every entry
+   * as the `instance` dimension. Defaults to the machine's hostname, which inside
+   * a container is the container id — the value that makes "which replica is
+   * failing?" answerable at all.
+   *
+   * Pass a string to choose it (a pod name, a release tag), or `false` to send
+   * nothing: a hostname can identify a machine, and on a single-host deployment
+   * it is noise. An `instance` in `dims` wins over either.
+   */
+  instance?: string | false
   /** Extends the default redacted body keys; it never replaces them. */
   redactKeys?: string[]
   /** Replaces the default request-header allowlist. */
