@@ -1,6 +1,6 @@
 {
   "name": "@leviathan.systems/logerhub-client",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Streams Express and WebSocket logs to a LogerHUB gateway over WebSocket, spooling to local SQLite while it is unreachable.",
   "keywords": [
     "logging",
