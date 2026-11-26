@@ -449,3 +449,165 @@ async function labelValues(label: string): Promise<string[]> {
     return []
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Instances and services.
+ *
+ * `service` and `env` are indexed Loki labels, so grouping by them is free.
+ * `instance` is not: the client sends it as a dimension, which lives in the
+ * line body. LogQL's json parser can lift it out — `| json
+ * instance="dims.instance"` — which costs a parse per line but is evaluated
+ * across the whole range, so a quiet instance still appears. A sampled count
+ * could not do that, and "which replica went quiet?" is the question the page
+ * exists to answer.
+ * ------------------------------------------------------------------------- */
+
+const ALL_STREAMS = '{service=~".+"}'
+const WITH_INSTANCE = ALL_STREAMS + ' | json instance="dims.instance"'
+const ERRORS_WITH_INSTANCE = '{service=~".+", level=~"error|fatal"} | json instance="dims.instance"'
+
+interface LokiMatrix {
+  metric: Record<string, string>
+  values: [number, string][]
+}
+
+/** A metric query over the range, bucketed. Used where the shape of time
+ *  matters rather than one total — here, to find the last bucket an instance
+ *  reported in, which is the only way LogQL will give up a last-seen: there is
+ *  no unwrap for an entry's own timestamp. */
+async function rangeMetric(query: string, minutes: number, stepSeconds: number): Promise<LokiMatrix[]> {
+  const end = Date.now()
+  const start = end - minutes * 60_000
+  const url =
+    LOKI + '/loki/api/v1/query_range?query=' + encodeURIComponent(query) +
+    '&start=' + start * 1e6 + '&end=' + end * 1e6 + '&step=' + stepSeconds
+  try {
+    const res = await fetch(url, { cache: 'no-store' })
+    if (!res.ok) return []
+    const body = (await res.json()) as { data?: { result?: LokiMatrix[] } }
+    return body.data?.result ?? []
+  } catch {
+    return []
+  }
+}
+
+export interface InstanceRow {
+  instance: string
+  service: string
+  env: string
+  lines: number
+  errors: number
+  /** Milliseconds since the last bucket this instance reported in, or null when
+   *  it could not be determined. The point of the page: a number that keeps
+   *  climbing is a replica that stopped reporting. Resolution is the bucket
+   *  width, so it is a "quiet for about this long", not a precise last-seen. */
+  quietForMs: number | null
+  /** The bucket width the figure above is accurate to, in milliseconds. */
+  resolutionMs: number
+}
+
+export interface InstanceOverview {
+  rows: InstanceRow[]
+  tookMs: number
+}
+
+export async function instances(minutes: number): Promise<InstanceOverview> {
+  const started = Date.now()
+  const window = logqlWindow(minutes)
+
+  // About two dozen buckets across the range, never finer than a minute. This
+  // is the resolution of "quiet for", so it is reported alongside the figure.
+  const step = Math.max(60, Math.round((minutes * 60) / 24))
+
+  const [totals, errors, overTime] = await Promise.all([
+    instantMetric('sum by (instance, service, env) (count_over_time(' + WITH_INSTANCE + '[' + window + ']))', minutes),
+    instantMetric('sum by (instance) (count_over_time(' + ERRORS_WITH_INSTANCE + '[' + window + ']))', minutes),
+    rangeMetric(
+      'sum by (instance) (count_over_time(' + WITH_INSTANCE + '[' + step + 's]))',
+      minutes,
+      step,
+    ),
+  ])
+
+  /** The timestamp of the newest bucket this instance actually reported in. */
+  const lastBucket = new Map<string, number>()
+  for (const series of overTime) {
+    let last = 0
+    for (const [t, v] of series.values) if (Number(v) > 0) last = Math.max(last, Number(t))
+    if (last > 0) lastBucket.set(series.metric.instance, last)
+  }
+
+  const n = (v: { value: [number, string] } | undefined) => (v ? Number(v.value[1]) || 0 : 0)
+  const errorByInstance = new Map(errors.map((r) => [r.metric.instance, n(r)]))
+  const now = Date.now()
+
+  const rows: InstanceRow[] = totals
+    // An entry whose dims carry no instance parses to an empty label. Those are
+    // lines from a client with `instance: false`, and grouping them under one
+    // blank row would invent a replica that does not exist.
+    .filter((r) => (r.metric.instance ?? '') !== '')
+    .map((r) => {
+      const seenSeconds = lastBucket.get(r.metric.instance) ?? 0
+      return {
+        instance: r.metric.instance,
+        service: r.metric.service ?? 'unknown',
+        env: r.metric.env ?? 'unknown',
+        lines: n(r),
+        errors: errorByInstance.get(r.metric.instance) ?? 0,
+        quietForMs: seenSeconds > 0 ? Math.max(0, now - seenSeconds * 1000) : null,
+        resolutionMs: step * 1000,
+      }
+    })
+    .sort((a, b) => b.lines - a.lines)
+
+  return { rows, tookMs: Date.now() - started }
+}
+
+export interface ServiceRow {
+  service: string
+  env: string
+  lines: number
+  errors: number
+  instances: number
+}
+
+export async function services(minutes: number): Promise<{ rows: ServiceRow[]; tookMs: number }> {
+  const started = Date.now()
+  const window = logqlWindow(minutes)
+
+  const [totals, errors, withInstance] = await Promise.all([
+    instantMetric('sum by (service, env) (count_over_time(' + ALL_STREAMS + '[' + window + ']))', minutes),
+    instantMetric(
+      'sum by (service, env) (count_over_time({service=~".+", level=~"error|fatal"}[' + window + ']))',
+      minutes,
+    ),
+    instantMetric(
+      'sum by (service, env, instance) (count_over_time(' + WITH_INSTANCE + '[' + window + ']))',
+      minutes,
+    ),
+  ])
+
+  const n = (v: { value: [number, string] } | undefined) => (v ? Number(v.value[1]) || 0 : 0)
+  const key = (service: string, env: string) => service + '\u0000' + env
+  const errorBy = new Map(errors.map((r) => [key(r.metric.service, r.metric.env), n(r)]))
+  const instanceCount = new Map<string, Set<string>>()
+  for (const r of withInstance) {
+    if ((r.metric.instance ?? '') === '') continue
+    const k = key(r.metric.service, r.metric.env)
+    const set = instanceCount.get(k) ?? new Set<string>()
+    set.add(r.metric.instance)
+    instanceCount.set(k, set)
+  }
+
+  const rows: ServiceRow[] = totals
+    .map((r) => ({
+      service: r.metric.service ?? 'unknown',
+      env: r.metric.env ?? 'unknown',
+      lines: n(r),
+      errors: errorBy.get(key(r.metric.service, r.metric.env)) ?? 0,
+      instances: instanceCount.get(key(r.metric.service, r.metric.env))?.size ?? 0,
+    }))
+    .sort((a, b) => b.lines - a.lines)
+
+  return { rows, tookMs: Date.now() - started }
+}

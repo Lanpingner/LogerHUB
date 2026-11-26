@@ -56,7 +56,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
     items: [
       { href: '/errors', label: 'Error Intelligence', icon: AlertTriangle, ready: true },
       { href: '/performance', label: 'Performance', icon: Gauge, ready: true },
-      { href: '/traffic', label: 'Traffic Analytics', icon: TrendingUp },
+      { href: '/traffic', label: 'Traffic Analytics', icon: TrendingUp, ready: true },
       { href: '/anomalies', label: 'Anomalies', icon: Activity },
       { href: '/incidents', label: 'Incidents', icon: Siren },
     ],
@@ -65,8 +65,8 @@ const GROUPS: { title: string; items: Item[] }[] = [
     title: 'Infrastructure',
     items: [
       { href: '/applications', label: 'Applications', icon: Boxes, ready: true },
-      { href: '/services', label: 'Services', icon: Workflow },
-      { href: '/instances', label: 'Instances', icon: Server },
+      { href: '/services', label: 'Services', icon: Workflow, ready: true },
+      { href: '/instances', label: 'Instances', icon: Server, ready: true },
       { href: '/environments', label: 'Environments', icon: Network, ready: true },
       { href: '/sources', label: 'Data Sources', icon: Database },
     ],

@@ -392,6 +392,49 @@ export function Endpoints() {
   )
 }
 
+/** Sticky header row for the table pages. `rightFrom` is the first column
+ *  index that holds a number, since those align right. Shared by Endpoints,
+ *  MCP Tools, Environments, Instances, Services and Traffic — they are
+ *  deliberately the same table, so they are built from the same pieces. */
+export function TableHead({ cols, rightFrom }: { cols: string[]; rightFrom: number }) {
+  return (
+    <Box component="thead" sx={{ position: 'sticky', top: 0, background: C.raised, zIndex: 1 }}>
+      <Box component="tr">
+        {cols.map((h, i) => (
+          <Box
+            component="th"
+            key={h + i}
+            sx={{
+              textAlign: i >= rightFrom ? 'right' : 'left',
+              fontSize: 10.5,
+              fontWeight: 500,
+              color: C.text2,
+              px: 1.5,
+              py: 0.75,
+              borderBottom: '1px solid ' + C.border,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {h}
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  )
+}
+
+/** The "nothing here" row. Its own component so an empty table says why it is
+ *  empty rather than just being blank, which reads as a broken page. */
+export function EmptyRow({ cols, children }: { cols: number; children: React.ReactNode }) {
+  return (
+    <Box component="tr">
+      <Box component="td" colSpan={cols} sx={{ px: 1.5, py: 2, fontSize: 11.5, color: C.muted, lineHeight: 1.7 }}>
+        {children}
+      </Box>
+    </Box>
+  )
+}
+
 export function Cell({
   children,
   right,

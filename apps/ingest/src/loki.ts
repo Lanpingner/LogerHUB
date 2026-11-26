@@ -1,6 +1,29 @@
 import type { LogEntry } from '@logguber/shared'
 import { LOKI_LIMITS } from '@logguber/shared'
 
+/**
+ * A refused push, carrying whether retrying it could ever work.
+ *
+ * This distinction is not cosmetic. Loki refuses a batch outright for reasons
+ * that will never change on their own: an entry older than
+ * reject_old_samples_max_age, or — the one that actually bites — an entry older
+ * than what the same stream has already accepted, which happens whenever one
+ * replica's spool replays a backlog while another replica keeps that stream's
+ * head current. Retrying those forever means the client never drains its spool
+ * and every later entry queues behind entries that cannot land.
+ */
+export class LokiPushError extends Error {
+  readonly status: number
+  /** 429 and 5xx are worth retrying. Any other 4xx is a verdict, not a hiccup. */
+  readonly retryable: boolean
+  constructor(status: number, detail: string) {
+    super('loki push ' + status + ': ' + detail)
+    this.name = 'LokiPushError'
+    this.status = status
+    this.retryable = status === 429 || status >= 500
+  }
+}
+
 export interface LokiPushOptions {
   url: string
   /** Fields promoted from an entry's dims/meta into structured metadata. */
@@ -115,6 +138,6 @@ export async function pushToLoki(
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`loki push ${res.status}: ${text.slice(0, 300)}`)
+    throw new LokiPushError(res.status, text.slice(0, 300))
   }
 }

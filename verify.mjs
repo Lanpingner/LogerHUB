@@ -75,7 +75,65 @@ const loki = createServer((req, res) => {
     req.on('end', () => { pushed.push(JSON.parse(Buffer.concat(chunks).toString())); res.writeHead(204).end() })
     return
   }
+  // Grouping label lookup. `service`, `env` and `level` are stream labels;
+  // anything else (such as `instance`) is a dimension in the line body, which
+  // real Loki reaches with `| json instance="dims.instance"`.
+  const labelOf = (st, value, name) => {
+    if (st.stream[name] !== undefined) return st.stream[name]
+    try {
+      const body = JSON.parse(value[1])
+      const v = body?.dims?.[name]
+      return typeof v === 'string' ? v : ''
+    } catch {
+      return ''
+    }
+  }
+  const groupLabels = (query) =>
+    (/by \(([^)]*)\)/.exec(query)?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  const isMetricQuery = (query) => /count_over_time|sum by/.test(query)
+
   if (req.url?.startsWith('/loki/api/v1/query_range')) {
+    const rqQuery = decodeURIComponent(new URL(req.url, 'http://x').searchParams.get('query') ?? '')
+    // A metric query on query_range returns a matrix, not streams. The
+    // Instances page uses one to find the last bucket each instance reported in.
+    if (isMetricQuery(rqQuery)) {
+      const params = new URL(req.url, 'http://x').searchParams
+      const step = Math.max(1, Number(params.get('step')) || 60)
+      const endSec = Math.floor(Number(params.get('end') ?? Date.now() * 1e6) / 1e9)
+      const startSec = Math.floor(Number(params.get('start') ?? 0) / 1e9)
+      const by = groupLabels(rqQuery)
+      const errorsOnly = /level=~"error\|fatal"/.test(rqQuery)
+      // counts[groupKey][bucketTs] = n
+      const counts = new Map()
+      for (const p of pushed) {
+        for (const st of p.streams) {
+          if (errorsOnly && !['error', 'fatal'].includes(st.stream.level)) continue
+          for (const value of st.values) {
+            const sec = Math.floor(Number(value[0]) / 1e9)
+            if (sec < startSec || sec > endSec) continue
+            const bucket = Math.ceil(sec / step) * step
+            const metric = {}
+            for (const l of by) metric[l] = labelOf(st, value, l)
+            const key = JSON.stringify(metric)
+            const perBucket = counts.get(key) ?? new Map()
+            perBucket.set(bucket, (perBucket.get(bucket) ?? 0) + 1)
+            counts.set(key, perBucket)
+          }
+        }
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        status: 'success',
+        data: {
+          resultType: 'matrix',
+          result: [...counts].map(([k, perBucket]) => ({
+            metric: JSON.parse(k),
+            values: [...perBucket].sort((a, b) => a[0] - b[0]).map(([t, n]) => [t, String(n)]),
+          })),
+        },
+      }))
+      return
+    }
     // Serve back what was pushed, so Search has something real to render.
     const result = pushed.flatMap((p) => p.streams)
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -87,16 +145,20 @@ const loki = createServer((req, res) => {
   // page is checked against numbers that follow from the logs this harness sent.
   if (req.url?.startsWith('/loki/api/v1/query?')) {
     const query = decodeURIComponent(new URL(req.url, 'http://x').searchParams.get('query') ?? '')
-    const by = (/by \(([^)]*)\)/.exec(query)?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    const by = groupLabels(query)
     const errorsOnly = /level=~"error\|fatal"/.test(query)
     const counts = new Map()
     for (const p of pushed) {
       for (const st of p.streams) {
         if (errorsOnly && !['error', 'fatal'].includes(st.stream.level)) continue
-        const metric = {}
-        for (const l of by) metric[l] = st.stream[l] ?? ''
-        const key = JSON.stringify(metric)
-        counts.set(key, (counts.get(key) ?? 0) + st.values.length)
+        // Per value, not per stream: a grouping label read from the line body
+        // can differ between entries of the same stream.
+        for (const value of st.values) {
+          const metric = {}
+          for (const l of by) metric[l] = labelOf(st, value, l)
+          const key = JSON.stringify(metric)
+          counts.set(key, (counts.get(key) ?? 0) + 1)
+        }
       }
     }
     res.writeHead(200, { 'content-type': 'application/json' })
@@ -278,6 +340,9 @@ await page('/live', ['Live Console'])
 await page('/endpoints', ['API Endpoints'])
 await page('/mcp', ['MCP Tools'])
 await page('/environments', ['Environments'])
+await page('/instances', ['Instances'])
+await page('/services', ['Services'])
+await page('/traffic', ['Traffic Analytics'])
 await page('/applications', ['Applications', 'public-api'])
 await page('/keys', ['public-api'])
 await page('/settings', ['Settings'])
@@ -309,6 +374,31 @@ await api('/api/environments?range=24h', (b) => {
   if (prod.lines !== 12) missing.push('prod lines=' + prod.lines + ', wanted 12')
   if (prod.errors !== 1) missing.push('prod errors=' + prod.errors + ', wanted 1')
   if (!prod.services.some((s) => s.service === 'public-api')) missing.push('public-api not listed under prod')
+  return missing
+})
+
+// Services and instances are counted from Loki across the whole range, not
+// sampled. The client stamps the hostname as its instance by default, so one
+// instance must be reporting for `public-api` in `prod`.
+await api('/api/services?range=24h', (b) => {
+  const row = (b.rows ?? []).find((r) => r.service === 'public-api' && r.env === 'prod')
+  if (!row) return ['no public-api/prod row']
+  const missing = []
+  if (row.lines !== 12) missing.push('lines=' + row.lines + ', wanted 12')
+  if (row.errors !== 1) missing.push('errors=' + row.errors + ', wanted 1')
+  if (row.instances !== 1) missing.push('instances=' + row.instances + ', wanted 1')
+  return missing
+})
+
+await api('/api/instances?range=24h', (b) => {
+  const rows = b.rows ?? []
+  if (rows.length !== 1) return ['wanted exactly one instance, got ' + rows.length]
+  const missing = []
+  if (rows[0].lines !== 12) missing.push('lines=' + rows[0].lines + ', wanted 12')
+  if (rows[0].service !== 'public-api') missing.push('service=' + rows[0].service)
+  // It reported moments ago, so it must not be flagged quiet.
+  if (rows[0].quietForMs == null) missing.push('no last-seen')
+  else if (rows[0].quietForMs > rows[0].resolutionMs * 2) missing.push('reads as quiet: ' + rows[0].quietForMs + 'ms')
   return missing
 })
 

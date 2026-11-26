@@ -5,7 +5,7 @@ import { openStore, type Store } from './store.ts'
 import { clientIp, ipAllowed, parseKey, secretMatches } from './auth.ts'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { hashPassword } from '@logguber/shared/password'
-import { pushToLoki } from './loki.ts'
+import { LokiPushError, pushToLoki } from './loki.ts'
 import { createBus, type Filter, type LiveEntry } from './bus.ts'
 import { rollupRows } from './rollup.ts'
 import { validate } from './validate.ts'
@@ -116,6 +116,16 @@ async function handleBatch(conn: Conn, frame: BatchFrame): Promise<{ ok: true } 
       sourceIp: conn.ip,
     })
   } catch (e) {
+    // A refusal Loki will repeat is not worth retrying: the client would hold
+    // the batch and every entry behind it forever. The claim is COMPLETED in
+    // that case, so a retry is treated as a duplicate and the client drops its
+    // copy — the entries are lost, which is the point of recording it loudly.
+    const refused = e instanceof LokiPushError && !e.retryable
+    if (refused) {
+      store.completeBatch(frame.id, conn.keyId)
+      store.logError(conn.keyId, 'loki_refused_batch', String(e))
+      return { ok: false, reason: 'loki refused the batch', retryable: false }
+    }
     // Hand the id back so the client's retry is treated as a retry.
     store.releaseBatch(frame.id, conn.keyId)
     store.logError(conn.keyId, 'loki_push_failed', String(e))

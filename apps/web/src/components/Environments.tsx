@@ -7,7 +7,7 @@ import { useConsole } from '../store/console'
 import { C } from '../lib/tokens'
 import { TimeRangeSelector } from './TimeRangeSelector'
 import { Panel } from './Panel'
-import { Cell } from './LogExplorer'
+import { Cell, EmptyRow, TableHead } from './LogExplorer'
 import { useStatusFacts } from './status-context'
 
 interface EnvRow {
@@ -84,10 +84,10 @@ export function Environments() {
       <Box sx={{ flex: 1, overflow: 'auto', p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
         <Panel title="Environments" hint={isFetching ? 'loading' : rows.length + ' reporting'} flush minHeight={200}>
           <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse' }}>
-            <Head cols={['Environment', 'Services', 'Lines', 'Errors', 'Error rate', 'Share']} rightFrom={2} />
+            <TableHead cols={['Environment', 'Services', 'Lines', 'Errors', 'Error rate', 'Share']} rightFrom={2} />
             <Box component="tbody">
               {rows.length === 0 ? (
-                <Empty cols={6}>No lines in this range.</Empty>
+                <EmptyRow cols={6}>No lines in this range.</EmptyRow>
               ) : (
                 rows.map((r) => (
                   <Box
@@ -117,10 +117,10 @@ export function Environments() {
             environments, where a blank cell means it is not running there. */}
         <Panel title="Service by environment" hint={services.length + ' services'} flush minHeight={160}>
           <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse' }}>
-            <Head cols={['Service', ...rows.map((r) => r.env)]} rightFrom={1} />
+            <TableHead cols={['Service', ...rows.map((r) => r.env)]} rightFrom={1} />
             <Box component="tbody">
               {services.length === 0 ? (
-                <Empty cols={rows.length + 1}>Nothing reporting yet.</Empty>
+                <EmptyRow cols={rows.length + 1}>Nothing reporting yet.</EmptyRow>
               ) : (
                 services.map((service) => (
                   <Box component="tr" key={service} sx={{ '&:hover': { background: C.raised } }}>
@@ -151,43 +151,6 @@ export function Environments() {
             </Box>
           </Panel>
         ) : null}
-      </Box>
-    </Box>
-  )
-}
-
-function Head({ cols, rightFrom }: { cols: string[]; rightFrom: number }) {
-  return (
-    <Box component="thead" sx={{ position: 'sticky', top: 0, background: C.raised, zIndex: 1 }}>
-      <Box component="tr">
-        {cols.map((h, i) => (
-          <Box
-            component="th"
-            key={h + i}
-            sx={{
-              textAlign: i >= rightFrom ? 'right' : 'left',
-              fontSize: 10.5,
-              fontWeight: 500,
-              color: C.text2,
-              px: 1.5,
-              py: 0.75,
-              borderBottom: '1px solid ' + C.border,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {h}
-          </Box>
-        ))}
-      </Box>
-    </Box>
-  )
-}
-
-function Empty({ cols, children }: { cols: number; children: React.ReactNode }) {
-  return (
-    <Box component="tr">
-      <Box component="td" colSpan={cols} sx={{ px: 1.5, py: 2, fontSize: 11.5, color: C.muted }}>
-        {children}
       </Box>
     </Box>
   )
