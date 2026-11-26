@@ -131,25 +131,22 @@ export function ApiKeys({ keys, knownServices = [] }: { keys: KeyView[]; knownSe
 export function Settings({
   levels,
   allowlist,
-  retentionDays,
   names,
 }: {
   levels: { key: string; label: string }[]
   allowlist: string[]
-  retentionDays: number
   names: Record<string, Record<string, string>>
 }) {
   const [pending, start] = useTransition()
   const [hierarchy, setHierarchy] = useState(levels.map((l) => l.key + ': ' + l.label).join('\n'))
   const [allow, setAllow] = useState(allowlist.join(' '))
-  const [retention, setRetention] = useState(String(retentionDays))
   const [dimKey, setDimKey] = useState(levels[1]?.key ?? 'company_id')
   const [dimValue, setDimValue] = useState('')
   const [display, setDisplay] = useState('')
 
   return (
     <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <Header title="Settings" hint="Hierarchy, access and retention" />
+      <Header title="Settings" hint="Hierarchy and access" />
       <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 2, alignItems: 'start' }}>
           <Panel title="Usage hierarchy" hint="drives drill-down and filters" minHeight={0}>
@@ -176,7 +173,7 @@ export function Settings({
             </Box>
           </Panel>
 
-          <Panel title="Access and retention" minHeight={0}>
+          <Panel title="Access" minHeight={0}>
             <TextField
               fullWidth
               label="Allowed source addresses (CIDR)"
@@ -186,19 +183,25 @@ export function Settings({
               slotProps={{ input: { sx: { fontFamily: MONO, fontSize: 12 } }, inputLabel: { shrink: true } }}
               helperText="Empty accepts connections from anywhere. A key with its own list ignores this."
             />
-            <TextField
-              label="Keep raw logs for (days)"
-              type="number"
-              value={retention}
-              onChange={(e) => setRetention(e.target.value)}
-              slotProps={{ inputLabel: { shrink: true } }}
-              sx={{ mt: 2, width: 180 }}
-              helperText="Usage counters are kept indefinitely."
-            />
+            {/* This was an editable "keep raw logs for (days)" field that
+                nothing read: retention is enforced by Loki, from
+                deploy/loki.yaml, and the number here changed only itself. A
+                control that does nothing is worse than no control, so it now
+                states what is actually configured. */}
+            <Box sx={{ mt: 2, fontSize: 11.5, color: C.text2, lineHeight: 1.9 }}>
+              <Box sx={{ fontSize: 11, color: C.muted, mb: 0.5 }}>Retention, as Loki is configured</Box>
+              <Box>debug and info — 14 days</Box>
+              <Box>warn and anything else — 30 days</Box>
+              <Box>error and fatal — 90 days</Box>
+              <Box sx={{ fontSize: 11, color: C.muted, mt: 1 }}>
+                Set in <Box component="span" sx={{ fontFamily: MONO }}>deploy/loki.yaml</Box> and applied by Loki's
+                compactor, so changing it is a deploy rather than a setting. Usage counters are never pruned.
+              </Box>
+            </Box>
             <Button
               variant="contained"
               disabled={pending}
-              onClick={() => start(() => void saveAccessAction(allow, Number(retention)))}
+              onClick={() => start(() => void saveAccessAction(allow))}
               sx={{ mt: 1.5, display: 'block' }}
             >
               Save settings

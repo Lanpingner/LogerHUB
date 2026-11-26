@@ -87,23 +87,19 @@ export async function saveHierarchyAction(text: string): Promise<void> {
     .filter((l) => l.key)
   if (!levels.length) return
   const current = settings()
-  saveSettings({ levels, globalIpAllowlist: current.globalIpAllowlist, retentionDays: current.retentionDays })
+  saveSettings({ levels, globalIpAllowlist: current.globalIpAllowlist })
   await notifyGateway()
   revalidatePath('/settings')
 }
 
-export async function saveAccessAction(allowlistText: string, retentionDays: number): Promise<void> {
+export async function saveAccessAction(allowlistText: string): Promise<void> {
   await requireOperator()
   const current = settings()
   const allowlist = allowlistText
     .split(/[\s,]+/)
     .map((s) => s.trim())
     .filter(Boolean)
-  saveSettings({
-    levels: current.levels,
-    globalIpAllowlist: allowlist,
-    retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : current.retentionDays,
-  })
+  saveSettings({ levels: current.levels, globalIpAllowlist: allowlist })
   await notifyGateway()
   revalidatePath('/settings')
 }

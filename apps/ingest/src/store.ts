@@ -41,7 +41,6 @@ export interface ApiKey {
 export interface Settings {
   levels: { key: string; label: string }[]
   globalIpAllowlist: string[]
-  retentionDays: number
   configVersion: number
 }
 
@@ -145,7 +144,6 @@ const DEFAULT_SETTINGS: Settings = {
     { key: 'user_id', label: 'User' },
   ],
   globalIpAllowlist: [],
-  retentionDays: 30,
   configVersion: 1,
 }
 

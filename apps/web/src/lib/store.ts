@@ -10,7 +10,6 @@ export interface Level {
 export interface Settings {
   levels: Level[]
   globalIpAllowlist: string[]
-  retentionDays: number
   configVersion: number
 }
 
@@ -21,7 +20,6 @@ const DEFAULTS: Settings = {
     { key: 'user_id', label: 'User' },
   ],
   globalIpAllowlist: [],
-  retentionDays: 30,
   configVersion: 1,
 }
 

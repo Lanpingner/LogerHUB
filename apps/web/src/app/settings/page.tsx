@@ -10,7 +10,6 @@ export default async function SettingsPage() {
     <Settings
       levels={cfg.levels}
       allowlist={cfg.globalIpAllowlist}
-      retentionDays={cfg.retentionDays}
       names={labels()}
     />
   )

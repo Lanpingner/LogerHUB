@@ -327,22 +327,22 @@ await api('/api/overview?range=24h', (b) => {
   return missing
 })
 
-// An unauthenticated request must get no console data and must be sent to the
-// login page. It is NOT asserted to be a 3xx: the root route has a loading
-// boundary, so Next flushes the shell before the page's redirect runs and the
-// redirect arrives as a meta refresh inside a 200. That is a real regression in
-// its own right — the proper fix is deciding auth in middleware, before the
-// stream starts — but what matters for security is that the body is empty of
-// data, so that is what this pins.
+// An unauthenticated request must be redirected with a real status and must
+// carry no console data. The status is asserted now that src/proxy.ts decides
+// this before rendering starts; it used to arrive as a meta refresh inside a
+// 200, because the root loading boundary flushes the shell before the page's
+// own redirect runs.
 {
   const res = await fetch('http://127.0.0.1:' + WEB_PORT + '/', { redirect: 'manual' })
   const html = res.status === 200 ? await res.text() : ''
-  const redirected =
-    (res.status >= 300 && res.status < 400) || /__next-page-redirect|NEXT_REDIRECT/.test(html)
+  const redirected = res.status >= 300 && res.status < 400
   // Strings that only appear once a panel has real data in it.
   const leaked = ['GET /v1/users 200', 'card declined', 'acme', 'globex'].filter((t) => html.includes(t))
   const missing = []
-  if (!redirected) missing.push('not sent to /login')
+  if (!redirected) missing.push('not redirected, status ' + res.status)
+  if (redirected && !(res.headers.get('location') ?? '').includes('/login')) {
+    missing.push('redirected to ' + res.headers.get('location'))
+  }
   if (leaked.length) missing.push('leaked: ' + leaked.join(', '))
   checks.push({ path: '/ (no cookie)', status: res.status, ok: missing.length === 0, missing })
 }
