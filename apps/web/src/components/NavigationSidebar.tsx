@@ -67,7 +67,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
       { href: '/applications', label: 'Applications', icon: Boxes, ready: true },
       { href: '/services', label: 'Services', icon: Workflow },
       { href: '/instances', label: 'Instances', icon: Server },
-      { href: '/environments', label: 'Environments', icon: Network },
+      { href: '/environments', label: 'Environments', icon: Network, ready: true },
       { href: '/sources', label: 'Data Sources', icon: Database },
     ],
   },

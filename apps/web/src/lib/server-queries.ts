@@ -327,3 +327,113 @@ export function overview(minutes: number): Overview {
     topClients: clients.slice(0, 12).map((r) => ({ name: r.label, requests: r.requests || r.lines, errors: r.errors })),
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Environment comparison.
+ *
+ * Every other aggregate panel in this console is computed from a capped sample
+ * of log lines, which makes it a statement about the newest N lines rather than
+ * about the range. These numbers are different: `count_over_time` is evaluated
+ * by Loki across the whole range, so they are exact. The cost is one query per
+ * figure instead of one shared sample, which is affordable here because the
+ * result is a handful of numbers rather than a list of rows.
+ *
+ * `env` is an indexed Loki label, so this needs nothing recorded that is not
+ * already there — unlike the usage rollup, whose dimensions do not include it.
+ * ------------------------------------------------------------------------- */
+
+interface LokiVector {
+  metric: Record<string, string>
+  value: [number, string]
+}
+
+/** LogQL duration for a window given in minutes. Loki accepts h/m suffixes; a
+ *  fractional hour would be rejected, so minutes are kept below the hour. */
+function logqlWindow(minutes: number): string {
+  if (minutes % 60 === 0) return minutes / 60 + 'h'
+  return Math.max(1, Math.round(minutes)) + 'm'
+}
+
+/** One instant metric query. Returns [] on any failure: an environments table
+ *  missing a column is better than a page that will not render. */
+async function instantMetric(query: string, minutes: number): Promise<LokiVector[]> {
+  const url =
+    LOKI + '/loki/api/v1/query?query=' + encodeURIComponent(query) +
+    '&time=' + Date.now() * 1e6
+  try {
+    const res = await fetch(url, { cache: 'no-store' })
+    if (!res.ok) return []
+    const body = (await res.json()) as { data?: { result?: LokiVector[] } }
+    return body.data?.result ?? []
+  } catch {
+    return []
+  }
+}
+
+export interface EnvRow {
+  env: string
+  lines: number
+  errors: number
+  services: { service: string; lines: number }[]
+}
+
+export interface EnvOverview {
+  rows: EnvRow[]
+  /** Environments the gateway knows a key is scoped to but which have sent
+   *  nothing in this range. Listed so a silent environment is visible as
+   *  silent rather than simply absent. */
+  silent: string[]
+  tookMs: number
+}
+
+export async function environments(minutes: number): Promise<EnvOverview> {
+  const started = Date.now()
+  const window = logqlWindow(minutes)
+  const all = '{service=~".+"}'
+
+  const [totals, errors, perService, known] = await Promise.all([
+    instantMetric('sum by (env) (count_over_time(' + all + '[' + window + ']))', minutes),
+    instantMetric(
+      'sum by (env) (count_over_time({service=~".+", level=~"error|fatal"}[' + window + ']))',
+      minutes,
+    ),
+    instantMetric('sum by (env, service) (count_over_time(' + all + '[' + window + ']))', minutes),
+    labelValues('env'),
+  ])
+
+  const n = (v: LokiVector | undefined) => (v ? Number(v.value[1]) || 0 : 0)
+  const errorByEnv = new Map(errors.map((r) => [r.metric.env, n(r)]))
+  const servicesByEnv = new Map<string, { service: string; lines: number }[]>()
+  for (const r of perService) {
+    const list = servicesByEnv.get(r.metric.env) ?? []
+    list.push({ service: r.metric.service, lines: n(r) })
+    servicesByEnv.set(r.metric.env, list)
+  }
+
+  const rows: EnvRow[] = totals
+    .map((r) => ({
+      env: r.metric.env || 'unknown',
+      lines: n(r),
+      errors: errorByEnv.get(r.metric.env) ?? 0,
+      services: (servicesByEnv.get(r.metric.env) ?? []).sort((a, b) => b.lines - a.lines),
+    }))
+    .sort((a, b) => b.lines - a.lines)
+
+  const seen = new Set(rows.map((r) => r.env))
+  return { rows, silent: known.filter((e) => !seen.has(e)).sort(), tookMs: Date.now() - started }
+}
+
+/** Distinct values Loki holds for a label. Used to tell "no traffic" apart from
+ *  "no such environment". */
+async function labelValues(label: string): Promise<string[]> {
+  try {
+    const res = await fetch(LOKI + '/loki/api/v1/label/' + encodeURIComponent(label) + '/values', {
+      cache: 'no-store',
+    })
+    if (!res.ok) return []
+    const body = (await res.json()) as { data?: string[] }
+    return body.data ?? []
+  } catch {
+    return []
+  }
+}
