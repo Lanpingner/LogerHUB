@@ -164,8 +164,16 @@ run('node', ['--experimental-strip-types', 'apps/ingest/src/server.ts'], {
 // apps/web/server.js from the standalone tree, with the static assets placed
 // beside it exactly as deploy/web.Dockerfile does.
 const STANDALONE = 'apps/web/.next/standalone'
-if (!existsSync(STANDALONE + '/apps/web/server.js')) {
-  console.log('no standalone build yet, running next build')
+// Always, unless asked not to. Building only when the output was missing meant
+// the harness happily tested a build from before the change under test — it
+// reported the old success rate for a commit that had already replaced it.
+// Reusing a stale build is the same failure as hitting a stale server, and both
+// end with a green run that proves nothing.
+if (process.env.VERIFY_SKIP_BUILD === '1') {
+  if (!existsSync(STANDALONE + '/apps/web/server.js')) throw new Error('VERIFY_SKIP_BUILD=1 but there is no build')
+  console.log('reusing the existing build (VERIFY_SKIP_BUILD=1) — it may not include your changes')
+} else {
+  console.log('building the console')
   const build = spawn('npm', ['run', 'build', '--workspace', '@logguber/web'], { stdio: 'inherit' })
   const code = await new Promise((r) => build.on('exit', r))
   if (code !== 0) throw new Error('next build failed with code ' + code)
@@ -204,6 +212,17 @@ for (const [company, user, n] of [['acme', 'u_1', 6], ['globex', 'u_7', 3]]) {
   }
 }
 log.error('card declined', { dims: { company_id: 'acme', user_id: 'u_1' }, meta: { http: { status: 502 } } })
+// Deliberately at info level with failing statuses. The usage counters must
+// classify these from the status, which the old level-based proxy could not: it
+// would have called both of them successes.
+log.log('info', 'GET /v1/users 404', {
+  kind: 'request', dims: { company_id: 'acme', user_id: 'u_1' },
+  meta: { http: { method: 'GET', route: '/v1/users', status: 404, duration_ms: 3 } },
+})
+log.log('info', 'GET /v1/users 500', {
+  kind: 'request', dims: { company_id: 'acme', user_id: 'u_1' },
+  meta: { http: { method: 'GET', route: '/v1/users', status: 500, duration_ms: 9 } },
+})
 await log.flush()
 await until(() => pushed.length > 0, 'loki push')
 console.log('client pushed ' + pushed.flatMap((p) => p.streams).length + ' streams')
@@ -286,10 +305,25 @@ await api('/api/environments?range=24h', (b) => {
   const prod = (b.rows ?? []).find((r) => r.env === 'prod')
   if (!prod) return ['no prod environment']
   const missing = []
-  // 10 lines went in: 9 requests and one error.
-  if (prod.lines !== 10) missing.push('prod lines=' + prod.lines + ', wanted 10')
+  // 12 lines went in: 11 requests and one error-level line.
+  if (prod.lines !== 12) missing.push('prod lines=' + prod.lines + ', wanted 12')
   if (prod.errors !== 1) missing.push('prod errors=' + prod.errors + ', wanted 1')
   if (!prod.services.some((s) => s.service === 'public-api')) missing.push('public-api not listed under prod')
+  return missing
+})
+
+// Success and error rates must come from HTTP status, not from log level. Of
+// the 11 requests pushed, one is a 404 and one a 500, and BOTH were logged at
+// info — so a level-based rate would report no failures at all.
+await api('/api/overview?range=24h', (b) => {
+  const missing = []
+  if (b.classified !== 11) missing.push('classified=' + b.classified + ', wanted 11')
+  if (Math.abs((b.successRate ?? 0) - 9 / 11) > 0.001) missing.push('successRate=' + b.successRate + ', wanted 9/11')
+  if (Math.abs((b.clientErrorRate ?? 0) - 1 / 11) > 0.001) missing.push('clientErrorRate=' + b.clientErrorRate)
+  if (Math.abs((b.serverErrorRate ?? 0) - 1 / 11) > 0.001) missing.push('serverErrorRate=' + b.serverErrorRate)
+  // The level-based counter still sees exactly one error, which is what makes
+  // the point: these are two different measurements of two different things.
+  if (b.errors !== 1) missing.push('errors=' + b.errors + ', wanted 1')
   return missing
 })
 

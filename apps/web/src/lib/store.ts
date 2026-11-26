@@ -65,6 +65,12 @@ export interface UsageRow {
   lines: number
   bytes: number
   requests: number
+  /** Requests whose status was a number, and the 4xx/5xx counts within them.
+   *  `classified: 0` with `requests > 0` means the hour predates these columns,
+   *  which is a different thing from an hour with no failures. */
+  classified: number
+  clientErrors: number
+  serverErrors: number
   errors: number
 }
 
@@ -77,8 +83,14 @@ export function usage(opts: {
   const since = Math.floor(Date.now() / 1000) - opts.sinceHours * 3600
   return withDb((db) => {
     const rows = db
-      .prepare('SELECT hour, dims, lines, bytes, requests, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour')
-      .all(opts.depth, since) as { hour: number; dims: string; lines: number; bytes: number; requests: number; errors: number }[]
+      .prepare(
+        `SELECT hour, dims, lines, bytes, requests, classified, client_errors, server_errors, errors
+           FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour`,
+      )
+      .all(opts.depth, since) as {
+      hour: number; dims: string; lines: number; bytes: number; requests: number
+      classified: number; client_errors: number; server_errors: number; errors: number
+    }[]
 
     const out: UsageRow[] = []
     for (const r of rows) {
@@ -98,7 +110,11 @@ export function usage(opts: {
         }
         if (!ok) continue
       }
-      out.push({ hour: r.hour, dims, lines: r.lines, bytes: r.bytes, requests: r.requests, errors: r.errors })
+      out.push({
+        hour: r.hour, dims, lines: r.lines, bytes: r.bytes, requests: r.requests,
+        classified: r.classified ?? 0, clientErrors: r.client_errors ?? 0, serverErrors: r.server_errors ?? 0,
+        errors: r.errors,
+      })
     }
     return out
   })
@@ -109,6 +125,9 @@ export interface Totals {
   dims: Record<string, string>
   lines: number
   requests: number
+  classified: number
+  clientErrors: number
+  serverErrors: number
   errors: number
   bytes: number
 }
@@ -121,11 +140,17 @@ export function totals(opts: { depth: number; sinceHours: number; prefix?: Recor
     const key = JSON.stringify(r.dims)
     let t = byDims.get(key)
     if (!t) {
-      t = { label: r.dims[opts.labelKey] ?? 'unknown', dims: r.dims, lines: 0, requests: 0, errors: 0, bytes: 0 }
+      t = {
+        label: r.dims[opts.labelKey] ?? 'unknown', dims: r.dims,
+        lines: 0, requests: 0, classified: 0, clientErrors: 0, serverErrors: 0, errors: 0, bytes: 0,
+      }
       byDims.set(key, t)
     }
     t.lines += r.lines
     t.requests += r.requests
+    t.classified += r.classified
+    t.clientErrors += r.clientErrors
+    t.serverErrors += r.serverErrors
     t.errors += r.errors
     t.bytes += r.bytes
   }

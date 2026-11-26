@@ -9,6 +9,12 @@ export interface UsageRow {
   bytes: number
   requests: number
   mcp_calls: number
+  /** Requests whose status was a number. The denominator for the two rates
+   *  below, and the signal that distinguishes "no failures" from "no data":
+   *  rows recorded before these columns existed read 0 here. */
+  classified: number
+  client_errors: number
+  server_errors: number
   errors: number
 }
 
@@ -62,6 +68,9 @@ CREATE TABLE IF NOT EXISTS usage_rollup (
   requests INTEGER NOT NULL DEFAULT 0,
   -- MCP tool calls, counted apart from the requests column: see rollup.ts.
   mcp_calls INTEGER NOT NULL DEFAULT 0,
+  classified INTEGER NOT NULL DEFAULT 0,
+  client_errors INTEGER NOT NULL DEFAULT 0,
+  server_errors INTEGER NOT NULL DEFAULT 0,
   errors INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (hour, depth, dims)
 );
@@ -170,6 +179,11 @@ export function openStore(file: string) {
   // operator's only record of what has been sent, and rebuilding it would
   // throw away every hour of history.
   addColumn('usage_rollup', 'mcp_calls', 'INTEGER NOT NULL DEFAULT 0')
+  // Usage gained HTTP status classes, so a success rate can be a success rate
+  // rather than "lines not logged at error level". Same in-place reasoning.
+  addColumn('usage_rollup', 'classified', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('usage_rollup', 'client_errors', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('usage_rollup', 'server_errors', 'INTEGER NOT NULL DEFAULT 0')
   // Operators gained `must_change_password`. Also in place: it is the only
   // record of who can log in.
   addColumn('operators', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0')
@@ -204,13 +218,17 @@ export function openStore(file: string) {
       'DELETE FROM ingest_errors WHERE id NOT IN (SELECT id FROM ingest_errors ORDER BY at DESC LIMIT ?)',
     ),
     rollup: db.prepare(`
-      INSERT INTO usage_rollup (hour, depth, dims, lines, bytes, requests, mcp_calls, errors)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO usage_rollup
+        (hour, depth, dims, lines, bytes, requests, mcp_calls, classified, client_errors, server_errors, errors)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(hour, depth, dims) DO UPDATE SET
         lines = lines + excluded.lines,
         bytes = bytes + excluded.bytes,
         requests = requests + excluded.requests,
         mcp_calls = mcp_calls + excluded.mcp_calls,
+        classified = classified + excluded.classified,
+        client_errors = client_errors + excluded.client_errors,
+        server_errors = server_errors + excluded.server_errors,
         errors = errors + excluded.errors`),
     logError: db.prepare('INSERT INTO ingest_errors (at, key_id, reason, detail) VALUES (?, ?, ?, ?)'),
     countRollup: db.prepare('SELECT COUNT(*) AS n FROM usage_rollup WHERE hour = ? AND depth = ?'),
@@ -227,7 +245,8 @@ export function openStore(file: string) {
     recentErrors: db.prepare('SELECT * FROM ingest_errors ORDER BY at DESC LIMIT 100'),
     operatorByEmail: db.prepare('SELECT * FROM operators WHERE email = ?'),
     usageAtDepth: db.prepare(
-      'SELECT hour, dims, lines, bytes, requests, mcp_calls, errors FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour',
+      `SELECT hour, dims, lines, bytes, requests, mcp_calls, classified, client_errors, server_errors, errors
+         FROM usage_rollup WHERE depth = ? AND hour >= ? ORDER BY hour`,
     ),
     insertOperator: db.prepare(
       'INSERT INTO operators (id, email, password_hash, created_at, must_change_password) VALUES (?, ?, ?, ?, ?)',
@@ -311,7 +330,10 @@ export function openStore(file: string) {
     releaseBatch(batchId: string, keyId: string): void {
       try { st.releaseBatch.run(keyId, batchId) } catch {}
     },
-    rollup(rows: { hour: number; depth: number; dims: string; lines: number; bytes: number; requests: number; mcp_calls: number; errors: number }[]) {
+    rollup(rows: {
+      hour: number; depth: number; dims: string; lines: number; bytes: number; requests: number
+      mcp_calls: number; classified: number; client_errors: number; server_errors: number; errors: number
+    }[]) {
       const tx = db.prepare('BEGIN IMMEDIATE')
       tx.run()
       try {
@@ -337,7 +359,10 @@ export function openStore(file: string) {
           } else if (!st.hasRollup.get(r.hour, r.depth, r.dims)) {
             counts.set(bucket, n + 1)
           }
-          st.rollup.run(r.hour, r.depth, dims, r.lines, r.bytes, r.requests, r.mcp_calls, r.errors)
+          st.rollup.run(
+            r.hour, r.depth, dims, r.lines, r.bytes, r.requests,
+            r.mcp_calls, r.classified, r.client_errors, r.server_errors, r.errors,
+          )
         }
         db.prepare('COMMIT').run()
         if (folded > 0) rolledUpOverflow = folded
@@ -392,6 +417,9 @@ export function openStore(file: string) {
         bytes: number
         requests: number
         mcp_calls: number
+        classified: number
+        client_errors: number
+        server_errors: number
         errors: number
       }[]
       const out: UsageRow[] = []
@@ -414,7 +442,9 @@ export function openStore(file: string) {
         }
         out.push({
           hour: r.hour, dims, lines: r.lines, bytes: r.bytes,
-          requests: r.requests, mcp_calls: r.mcp_calls, errors: r.errors,
+          requests: r.requests, mcp_calls: r.mcp_calls,
+          classified: r.classified, client_errors: r.client_errors, server_errors: r.server_errors,
+          errors: r.errors,
         })
       }
       return out

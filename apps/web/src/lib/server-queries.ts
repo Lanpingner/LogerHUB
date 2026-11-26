@@ -272,9 +272,15 @@ export function tree(minutes: number): TreeEnv[] {
 export interface Overview {
   requests: number
   perSecond: number
-  successRate: number
-  clientErrorRate: number
-  serverErrorRate: number
+  /** Null when no request in the range carried a numeric status, which is the
+   *  case for every hour recorded before the status columns existed. A rate of
+   *  100% would be a claim the data cannot support. */
+  successRate: number | null
+  clientErrorRate: number | null
+  serverErrorRate: number | null
+  /** Requests the rates above are computed from. Smaller than `requests` while
+   *  the range still contains hours from before the columns were added. */
+  classified: number
   lines: number
   errors: number
   bytes: number
@@ -310,14 +316,20 @@ export function overview(minutes: number): Overview {
   const bytes = byApp.reduce((a, r) => a + r.bytes, 0)
   const buckets = volume(minutes)
 
+  // Counted from HTTP status, not from log level. The old proxy — error-level
+  // lines over all lines — called a 500 logged at info a success, and could not
+  // distinguish a client's bad request from the server failing.
+  const classified = byApp.reduce((a, r) => a + r.classified, 0)
+  const clientErrors = byApp.reduce((a, r) => a + r.clientErrors, 0)
+  const serverErrors = byApp.reduce((a, r) => a + r.serverErrors, 0)
+
   return {
     requests,
     perSecond: requests / Math.max(1, minutes * 60),
-    successRate: lines ? 1 - errors / lines : 1,
-    // Without a status breakdown in the counters, warn-level lines stand in for
-    // client errors and error-level for server errors. Stated, not implied.
-    clientErrorRate: 0,
-    serverErrorRate: lines ? errors / lines : 0,
+    successRate: classified ? (classified - clientErrors - serverErrors) / classified : null,
+    clientErrorRate: classified ? clientErrors / classified : null,
+    serverErrorRate: classified ? serverErrors / classified : null,
+    classified,
     lines,
     errors,
     bytes,

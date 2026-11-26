@@ -118,15 +118,30 @@ export function Overview() {
   const metrics: Metric[] = [
     { label: 'Total requests', value: compact(data?.requests ?? 0), spark: bucketsToSpark(data?.buckets ?? []), tone: C.info },
     { label: 'Requests / sec', value: (data?.perSecond ?? 0).toFixed(2), tone: C.text },
+    // These three are null until the range contains hours recorded with the
+    // status columns. `?? 1` would have read as a flat 100% success — the exact
+    // reassuring lie worth avoiding, so an unknown rate renders as a dash.
     {
       label: 'Success rate',
-      value: ((data?.successRate ?? 1) * 100).toFixed(1) + '%',
-      tone: (data?.successRate ?? 1) > 0.98 ? C.success : (data?.successRate ?? 1) > 0.95 ? C.warning : C.error,
+      value: data?.successRate == null ? '—' : (data.successRate * 100).toFixed(1) + '%',
+      tone:
+        data?.successRate == null
+          ? C.muted
+          : data.successRate > 0.98
+            ? C.success
+            : data.successRate > 0.95
+              ? C.warning
+              : C.error,
+    },
+    {
+      label: 'Client error rate',
+      value: data?.clientErrorRate == null ? '—' : (data.clientErrorRate * 100).toFixed(2) + '%',
+      tone: data?.clientErrorRate == null ? C.muted : data.clientErrorRate > 0.1 ? C.warning : C.text,
     },
     {
       label: 'Server error rate',
-      value: ((data?.serverErrorRate ?? 0) * 100).toFixed(2) + '%',
-      tone: (data?.serverErrorRate ?? 0) > 0.02 ? C.error : C.text,
+      value: data?.serverErrorRate == null ? '—' : (data.serverErrorRate * 100).toFixed(2) + '%',
+      tone: data?.serverErrorRate == null ? C.muted : data.serverErrorRate > 0.02 ? C.error : C.text,
       spark: bucketsToSpark(data?.buckets ?? [], 'errors'),
       deltaGoodWhenUp: false,
     },
