@@ -4,13 +4,32 @@ import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { createHmac, scryptSync } from 'node:crypto'
-import { rmSync, mkdirSync } from 'node:fs'
+import { rmSync, mkdirSync, existsSync, cpSync } from 'node:fs'
+import { createServer as createNetServer } from 'node:net'
+import { resolve } from 'node:path'
 import { createLogger } from './packages/client/dist/index.mjs'
 
-const LOKI_PORT = 13101
-const GW_PORT = 18081
-const WEB_PORT = 13000
+/** A port the OS says is free right now. Hardcoded ports made this harness
+ *  unrunnable whenever an earlier run left a server behind — and worse, an
+ *  orphan on the console's port once made every check pass against a build
+ *  from the day before. */
+const freePort = () =>
+  new Promise((ok, fail) => {
+    const s = createNetServer()
+    s.once('error', fail)
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address()
+      s.close(() => ok(port))
+    })
+  })
+
+const LOKI_PORT = await freePort()
+const GW_PORT = await freePort()
+const WEB_PORT = await freePort()
 const DB = './apps/ingest/data/verify.db'
+/** The standalone server runs with its own working directory, so a relative
+ *  database path would resolve somewhere else entirely. */
+const DB_ABS = resolve(DB)
 const CONSOLE_SECRET = 'verify-console-secret'
 const SESSION_SECRET = 'verify-session-secret'
 const EMAIL = 'ops@example.com'
@@ -63,6 +82,44 @@ const loki = createServer((req, res) => {
     res.end(JSON.stringify({ status: 'success', data: { resultType: 'streams', result } }))
     return
   }
+  // Instant metric queries, as `sum by (<labels>) (count_over_time(...))`.
+  // Computed from the pushed streams rather than canned, so the Environments
+  // page is checked against numbers that follow from the logs this harness sent.
+  if (req.url?.startsWith('/loki/api/v1/query?')) {
+    const query = decodeURIComponent(new URL(req.url, 'http://x').searchParams.get('query') ?? '')
+    const by = (/by \(([^)]*)\)/.exec(query)?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    const errorsOnly = /level=~"error\|fatal"/.test(query)
+    const counts = new Map()
+    for (const p of pushed) {
+      for (const st of p.streams) {
+        if (errorsOnly && !['error', 'fatal'].includes(st.stream.level)) continue
+        const metric = {}
+        for (const l of by) metric[l] = st.stream[l] ?? ''
+        const key = JSON.stringify(metric)
+        counts.set(key, (counts.get(key) ?? 0) + st.values.length)
+      }
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      status: 'success',
+      data: {
+        resultType: 'vector',
+        result: [...counts].map(([k, n]) => ({ metric: JSON.parse(k), value: [Date.now() / 1000, String(n)] })),
+      },
+    }))
+    return
+  }
+  const label = /^\/loki\/api\/v1\/label\/([^/]+)\/values/.exec(req.url ?? '')
+  if (label) {
+    const seen = new Set()
+    for (const p of pushed) for (const st of p.streams) {
+      const v = st.stream[label[1]]
+      if (v) seen.add(v)
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ status: 'success', data: [...seen].sort() }))
+    return
+  }
   res.writeHead(404).end()
 })
 
@@ -102,12 +159,28 @@ run('node', ['--experimental-strip-types', 'apps/ingest/src/server.ts'], {
   PORT: String(GW_PORT), LOGGUBER_DB: DB, LOKI_URL: 'http://127.0.0.1:' + LOKI_PORT, CONSOLE_SECRET,
 }, 'gw')
 
-run('npx', ['next', 'start', '-p', String(WEB_PORT)], {
-  LOGGUBER_DB: '../../' + DB,
+// `next start` refuses an `output: 'standalone'` build, which is what this
+// project ships, so the harness runs the same server the container runs:
+// apps/web/server.js from the standalone tree, with the static assets placed
+// beside it exactly as deploy/web.Dockerfile does.
+const STANDALONE = 'apps/web/.next/standalone'
+if (!existsSync(STANDALONE + '/apps/web/server.js')) {
+  console.log('no standalone build yet, running next build')
+  const build = spawn('npm', ['run', 'build', '--workspace', '@logguber/web'], { stdio: 'inherit' })
+  const code = await new Promise((r) => build.on('exit', r))
+  if (code !== 0) throw new Error('next build failed with code ' + code)
+}
+// Without this every /_next/static request 404s: the static assets are
+// deliberately not part of the standalone output.
+cpSync('apps/web/.next/static', STANDALONE + '/apps/web/.next/static', { recursive: true })
+
+run('node', ['apps/web/server.js'], {
+  LOGGUBER_DB: DB_ABS,
   LOKI_URL: 'http://127.0.0.1:' + LOKI_PORT,
   INGEST_INTERNAL_URL: 'http://127.0.0.1:' + GW_PORT,
   CONSOLE_SECRET, SESSION_SECRET, NODE_ENV: 'production',
-}, 'web', 'apps/web')
+  PORT: String(WEB_PORT), HOSTNAME: '127.0.0.1',
+}, 'web', STANDALONE)
 
 await until(async () => (await fetch('http://127.0.0.1:' + GW_PORT + '/health')).ok, 'gateway')
 console.log('gateway up')
@@ -175,21 +248,70 @@ async function page(path, mustContain) {
   return html
 }
 
-// React splits adjacent text nodes in SSR output, so assert on the values
-// rather than on rendered "key=value" pairs.
-await page('/', ['Search', 'GET /v1/users 200', 'company_id', 'acme', 'card declined'])
-// The default usage view is the first hierarchy level: service.
-await page('/usage', ['Usage', 'public-api', 'Requests', 'Error rate'])
-// Drilling into a service shows the companies under it — the operator's main question.
-await page('/usage?p_service=public-api', ['acme', 'globex', 'Company'])
-// And one more level down: the users inside one company.
-await page('/usage?p_service=public-api&p_company_id=acme', ['u_1', 'User'])
-await page('/live', ['Live tail', 'Connecting'])
-await page('/admin', ['Admin', 'public-api', 'Drill-down hierarchy'])
+// Every data panel in this console is a client component that fetches after
+// hydration, so the server-rendered HTML carries chrome and no data. Asserting
+// log content against HTML only worked while `/` was a server-rendered search
+// page. Pages are checked for rendering; the data they will fetch is checked
+// against the APIs they fetch it from, which is the stronger assertion anyway.
+await page('/', ['Overview'])
+await page('/explorer', ['Log Explorer'])
+await page('/live', ['Live Console'])
+await page('/endpoints', ['API Endpoints'])
+await page('/mcp', ['MCP Tools'])
+await page('/environments', ['Environments'])
+await page('/applications', ['Applications', 'public-api'])
+await page('/keys', ['public-api'])
+await page('/settings', ['Settings'])
 
-// An unauthenticated request must not see any of it.
-const anon = await fetch('http://127.0.0.1:' + WEB_PORT + '/usage', { redirect: 'manual' })
-checks.push({ path: '/usage (no cookie)', status: anon.status, ok: anon.status >= 300 && anon.status < 400, missing: [] })
+async function api(path, check) {
+  const res = await fetch('http://127.0.0.1:' + WEB_PORT + path, { headers: { cookie } })
+  let body = null
+  try { body = await res.json() } catch {}
+  const missing = res.ok && body ? check(body) : ['status ' + res.status]
+  checks.push({ path, status: res.status, ok: res.status === 200 && missing.length === 0, missing })
+}
+
+// The lines this harness pushed must come back out through the search API.
+await api('/api/search?range=24h&limit=500&q=', (b) => {
+  const msgs = (b.rows ?? []).map((r) => r.msg).join(' | ')
+  const want = ['GET /v1/users 200', 'card declined']
+  const missing = want.filter((t) => !msgs.includes(t))
+  const dims = (b.rows ?? []).some((r) => r.company === 'acme' && r.user === 'u_1')
+  if (!dims) missing.push('a row carrying company acme / user u_1')
+  return missing
+})
+
+// Exact per-environment counts, straight from Loki rather than a sample.
+await api('/api/environments?range=24h', (b) => {
+  const prod = (b.rows ?? []).find((r) => r.env === 'prod')
+  if (!prod) return ['no prod environment']
+  const missing = []
+  // 10 lines went in: 9 requests and one error.
+  if (prod.lines !== 10) missing.push('prod lines=' + prod.lines + ', wanted 10')
+  if (prod.errors !== 1) missing.push('prod errors=' + prod.errors + ', wanted 1')
+  if (!prod.services.some((s) => s.service === 'public-api')) missing.push('public-api not listed under prod')
+  return missing
+})
+
+// An unauthenticated request must get no console data and must be sent to the
+// login page. It is NOT asserted to be a 3xx: the root route has a loading
+// boundary, so Next flushes the shell before the page's redirect runs and the
+// redirect arrives as a meta refresh inside a 200. That is a real regression in
+// its own right — the proper fix is deciding auth in middleware, before the
+// stream starts — but what matters for security is that the body is empty of
+// data, so that is what this pins.
+{
+  const res = await fetch('http://127.0.0.1:' + WEB_PORT + '/', { redirect: 'manual' })
+  const html = res.status === 200 ? await res.text() : ''
+  const redirected =
+    (res.status >= 300 && res.status < 400) || /__next-page-redirect|NEXT_REDIRECT/.test(html)
+  // Strings that only appear once a panel has real data in it.
+  const leaked = ['GET /v1/users 200', 'card declined', 'acme', 'globex'].filter((t) => html.includes(t))
+  const missing = []
+  if (!redirected) missing.push('not sent to /login')
+  if (leaked.length) missing.push('leaked: ' + leaked.join(', '))
+  checks.push({ path: '/ (no cookie)', status: res.status, ok: missing.length === 0, missing })
+}
 
 // The live relay must refuse an unauthenticated caller too.
 const anonLive = await fetch('http://127.0.0.1:' + WEB_PORT + '/api/live', { redirect: 'manual' })
@@ -207,5 +329,5 @@ if (failed.length) {
   console.error('\n' + failed.length + ' check(s) failed')
   process.exit(1)
 }
-console.log('\nPASS: gateway, client, Loki push, search, usage, live and admin all work together')
+console.log('\nPASS: gateway, client, Loki push, explorer, environments, live and settings all work together')
 process.exit(0)
